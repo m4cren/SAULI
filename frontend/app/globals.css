@@ -1,0 +1,39 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap");
+@import "tailwindcss";
+
+:root {
+  --sauli-font: "Space Grotesk", Arial, Helvetica, sans-serif;
+  --sauli-brand: #0b474f;
+  --sauli-brand-gradient: linear-gradient(180deg, #315f66 0%, #23616a 45%, #1c9e91 100%);
+  --sauli-background: #eaeaea;
+  --sauli-surface: #ffffff;
+  --sauli-border: #cccccc;
+  --sauli-text: #111111;
+  --sauli-muted: #616161;
+  --sauli-success: #1a9b8e;
+  --sauli-warning: #efaa37;
+  --sauli-error: #d01818;
+}
+
+@theme inline {
+  --color-background: var(--sauli-background);
+  --color-foreground: var(--sauli-text);
+  --font-sans: var(--sauli-font);
+  --font-mono: var(--sauli-font);
+}
+
+html { overflow-x: hidden; }
+body { margin: 0; color: var(--sauli-text); background: #dadada; font-family: var(--sauli-font); }
+button, input, select, textarea { font: inherit; }
+.sauli-gradient { background: var(--sauli-brand-gradient); }
+.sauli-card { border: 1px solid var(--sauli-border); border-radius: 9px; background: var(--sauli-surface); }
+.sauli-label { display: block; margin-bottom: 7px; font-size: 14px; font-weight: 600; letter-spacing: .08em; }
+.sauli-field { width: 100%; min-height: 42px; border: 1px solid var(--sauli-border); border-radius: 8px; background: white; padding: 8px 11px; color: var(--sauli-text); font-size: 14px; letter-spacing: .04em; }
+.sauli-field:focus { outline: 2px solid var(--sauli-brand); outline-offset: 1px; }
+.sauli-page { padding: 16px 21px 38px; }
+.sauli-eyebrow { color: #287981; font-size: 12px; font-weight: 700; letter-spacing: .06em; }
+.sauli-title { font-size: clamp(27px, 8vw, 32px); line-height: 1.12; font-weight: 600; letter-spacing: -.025em; }
+.sauli-subtitle { font-size: 14px; line-height: 1.35; letter-spacing: .08em; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
