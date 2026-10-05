@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
-import BrandMark from "@/app/components/BrandMark";
+import BrandFrame from "@/app/components/BrandFrame";
 import FacebookLoginButton from "./FacebookLoginButton";
 
 export default function LoginPage({
@@ -21,13 +21,7 @@ export default function LoginPage({
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[428px] flex-col bg-[var(--sauli-background)] px-8 pb-10 shadow-[0_0_35px_rgba(0,0,0,0.08)]">
-      <div className="relative mx-auto mt-[min(13vh,120px)] flex h-[108px] w-[200px] items-center justify-center" aria-label="SAULI">
-        <span className="absolute left-0 top-0 h-[30px] w-[58px] rounded-tl-sm border-l-[14px] border-t-[14px] border-[#1b8e83]" />
-        <span className="absolute right-0 top-0 h-[30px] w-[58px] rounded-tr-sm border-r-[14px] border-t-[14px] border-[#0b474f]" />
-        <BrandMark large />
-        <span className="absolute bottom-0 left-0 h-[30px] w-[58px] rounded-bl-sm border-b-[14px] border-l-[14px] border-[#0b474f]" />
-        <span className="absolute bottom-0 right-0 h-[30px] w-[58px] rounded-br-sm border-b-[14px] border-r-[14px] border-[#1b8e83]" />
-      </div>
+      <BrandFrame className="mx-auto mt-[min(13vh,120px)]" />
       <div className="mt-auto pt-10">
         <p className="mb-5 text-[17px] tracking-[0.02em]">Secure Automated Unit for Lost Item</p>
         <section className="rounded-[12px] bg-white px-[30px] py-[60px] shadow-[0_3px_4px_rgba(0,0,0,0.16)]">
