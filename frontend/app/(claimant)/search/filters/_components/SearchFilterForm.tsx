@@ -35,10 +35,6 @@ export default function SearchFilterForm() {
       setError("Add a description before searching.");
       return;
     }
-    if (!values.category) {
-      setError("Choose an item category.");
-      return;
-    }
     setPending(true);
     await runSearch(values);
     router.push("/search/results");
@@ -48,7 +44,7 @@ export default function SearchFilterForm() {
     <main className="sauli-page pb-10">
       <BackButton href="/">Back</BackButton>
       <h1 className="sauli-title mt-0.5">Help us narrow it down</h1>
-      <p className="sauli-subtitle mt-1">Your description needs a few more details before SAULI can search.</p>
+      <p className="sauli-subtitle mt-1">Add optional details to improve the search ranking.</p>
       <form onSubmit={(event) => void submit(event)} className="mt-[58px] space-y-5">
         <SelectField id="category" label="Item Category" value={values.category} placeholder="Select Category" options={["Wallet", "Electronics", "Keys", "Clothing", "Other"]} onChange={(value) => set("category", value)} />
         <div className="grid grid-cols-2 gap-3">
@@ -59,7 +55,7 @@ export default function SearchFilterForm() {
         <div><label htmlFor="last-seen-location" className="sauli-label">Where was it last seen?</label><input id="last-seen-location" className="sauli-field" placeholder="e.g. Library, Canteen" value={values.lastSeenLocation} onChange={(event) => set("lastSeenLocation", event.target.value)} /></div>
         <div><label htmlFor="last-seen-at" className="sauli-label">Date &amp; Time last seen</label><input id="last-seen-at" type="datetime-local" className="sauli-field" value={values.lastSeenAt} onChange={(event) => set("lastSeenAt", event.target.value)} /></div>
         {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-        <Button type="submit" disabled={pending} className="w-full gap-2">{pending ? "Searching…" : "Search stored items"}<Icon name="search" size={22} /></Button>
+        <Button type="submit" disabled={pending} className="w-full gap-2">{pending ? "Searching…" : "Search available items"}<Icon name="search" size={22} /></Button>
       </form>
     </main>
   );

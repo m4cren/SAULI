@@ -5,3 +5,7 @@ pydantic>=2.10,<3
 python-dotenv>=1.0,<2
 httpx>=0.28,<1
 ollama>=0.6,<1
+pillow>=11,<13
+pydantic-settings>=2,<3
+supabase>=2.15,<3
+pytest>=8,<10

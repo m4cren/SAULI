@@ -1,7 +1,8 @@
 "use client";
 
 import { createContext, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { assignedCompartment, compartments, createMockReview } from "../_data/mockKioskData";
+import { compartments } from "../_data/mockKioskData";
+import { analyzeFoundItem, confirmAndStoreFoundItem, reconcileFoundItemReview, type FoundItemAnalysis } from "@/libs/api/sauli";
 import type { ImageKind } from "../_types/kiosk";
 import { initialKioskState, kioskReducer } from "./kioskReducer";
 
@@ -10,11 +11,15 @@ const allowedImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 function useKioskFlow() {
   const [state, dispatch] = useReducer(kioskReducer, initialKioskState);
   const [allOccupied, setAllOccupied] = useState(false);
+  const [analysis, setAnalysis] = useState<FoundItemAnalysis | null>(null);
+  const [busy, setBusy] = useState(false);
+  const files = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
+  const confirmationKey = useRef<string | null>(null);
+  const confirmInFlight = useRef(false);
   const objectUrls = useRef<Record<ImageKind, string | null>>({ front: null, back: null, qr: null });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slots = allOccupied ? compartments.map((slot) => ({ ...slot, occupied: true })) : compartments;
   const availableCount = slots.filter((slot) => !slot.occupied).length;
-  const assignedAvailable = slots.some((slot) => slot.id === assignedCompartment && !slot.occupied);
 
   useEffect(() => {
     const urls = objectUrls;
@@ -44,6 +49,7 @@ function useKioskFlow() {
     clearImage(kind);
     const url = URL.createObjectURL(file);
     objectUrls.current[kind] = url;
+    if (kind === "front" || kind === "back") { files.current[kind] = file; confirmationKey.current = null; }
     dispatch({ type: "IMAGE_SELECTED", kind, url });
   }
 
@@ -51,6 +57,9 @@ function useKioskFlow() {
     clearTimer();
     (Object.keys(objectUrls.current) as ImageKind[]).forEach(clearImage);
     setAllOccupied(false);
+    files.current = { front: null, back: null };
+    confirmationKey.current = null;
+    setAnalysis(null);
     dispatch({ type: "RESET" });
   }
 
@@ -58,38 +67,60 @@ function useKioskFlow() {
     clearTimer();
     clearImage("front");
     clearImage("back");
+    files.current = { front: null, back: null };
+    confirmationKey.current = null;
+    setAnalysis(null);
     dispatch({ type: "RETAKE_PHOTOS" });
   }
 
-  function identify() {
+  async function identify() {
     if (!state.foundLocation.trim()) {
       dispatch({ type: "SET_ERROR", message: "Enter where the item was found." });
       return;
     }
-    if (!state.images.front || !state.images.back) return;
+    if (!files.current.front || !files.current.back || busy) return;
     dispatch({ type: "IDENTIFY_STARTED" });
-    clearTimer();
-    timer.current = setTimeout(() => dispatch({ type: "IDENTIFIED", review: createMockReview(state.foundLocation, state.extraNotes) }), 850);
+    setBusy(true);
+    try {
+      const result = await analyzeFoundItem(files.current.front, files.current.back, state.foundLocation, state.extraNotes);
+      setAnalysis(result.analysis);
+      dispatch({ type: "IDENTIFIED", review: { name: result.analysis.object_name, summary: result.summary,
+        category: result.analysis.category, color: result.analysis.colors.join(", "),
+        material: result.analysis.material.join(", "), size: "Not assigned" } });
+    } catch (error) {
+      dispatch({ type: "IDENTIFY_FAILED", message: error instanceof Error ? error.message : "Analysis failed." });
+    } finally { setBusy(false); }
   }
 
-  function confirmFound() {
-    if (Object.values(state.review).some((value) => !value.trim())) {
-      dispatch({ type: "SET_ERROR", message: "Complete the item name and all generated detail fields." });
-      return;
-    }
-    if (!assignedAvailable) {
-      dispatch({ type: "SET_ERROR", message: "The assigned compartment is unavailable in this simulation." });
-      return;
-    }
-    dispatch({ type: "FOUND_CONFIRMED" });
+  async function confirmFound() {
+    if (!analysis || !files.current.front || !files.current.back || busy || confirmInFlight.current) return;
+    confirmInFlight.current = true;
+    setBusy(true);
+    confirmationKey.current ??= crypto.randomUUID();
+    try {
+      await confirmAndStoreFoundItem(files.current.front, files.current.back, state.foundLocation, state.extraNotes, analysis, confirmationKey.current);
+      clearImage("front"); clearImage("back");
+      files.current = { front: null, back: null };
+      setAnalysis(null);
+      dispatch({ type: "FOUND_CONFIRMED" });
+    } catch (error) {
+      dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "The item could not be saved." });
+    } finally { confirmInFlight.current = false; setBusy(false); }
   }
 
-  function saveReview() {
-    if (Object.values(state.review).some((value) => !value.trim())) {
-      dispatch({ type: "SET_ERROR", message: "Complete the item name and all generated detail fields." });
-      return;
-    }
-    dispatch({ type: "SAVE_REVIEW" });
+  async function saveReview() {
+    if (!analysis || busy) return;
+    if (!state.correctionNote.trim()) { dispatch({ type: "SAVE_REVIEW" }); return; }
+    setBusy(true);
+    try {
+      const result = await reconcileFoundItemReview(analysis, state.foundLocation, state.extraNotes, state.correctionNote);
+      setAnalysis(result.analysis);
+      dispatch({ type: "REVIEW_RECONCILED", review: { name: result.analysis.object_name, summary: result.summary,
+        category: result.analysis.category, color: result.analysis.colors.join(", "),
+        material: result.analysis.material.join(", "), size: "Not assigned" } });
+    } catch (error) {
+      dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "The correction could not be applied." });
+    } finally { setBusy(false); }
   }
 
   function validateQr() {
@@ -119,9 +150,9 @@ function useKioskFlow() {
   }
 
   return {
-    state, slots, availableCount,
+    state, slots, availableCount, busy, analysis,
     selectFile, reset, retakePhotos, identify, confirmFound, saveReview, validateQr, simulateQr, tryAnotherQr, simulateNoSlots,
-    startFound: () => dispatch({ type: availableCount && assignedAvailable ? "START_FOUND" : "NO_SLOTS" }),
+    startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),
     acceptSide: (side: "front" | "back") => dispatch({ type: "SIDE_ACCEPTED", side }),
     setLocation: (value: string) => dispatch({ type: "LOCATION_CHANGED", value }),

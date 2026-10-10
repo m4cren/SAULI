@@ -26,7 +26,13 @@ export interface SearchResult {
   storageStatus: "stored";
   foundLocation: string;
   foundAt: string;
-  compartmentId: CompartmentId;
+  compartmentId?: CompartmentId;
+  rank?: number;
+  summary?: string;
+  explanation?: string;
+  matchedAttributes?: string[];
+  differences?: string[];
+  imageUrl?: string | null;
 }
 
 export interface MissingReportInput {
@@ -69,9 +75,7 @@ export interface MockIncident {
 }
 
 export interface ClaimantService {
-  searchItems(input: SearchInput): Promise<SearchResult[]>;
   createMissingReport(input: MissingReportInput): Promise<MissingReport>;
-  createRetrievalRequest(item: SearchResult): Promise<RetrievalPass>;
   getRetrievalHistory(): Promise<RetrievalRecord[]>;
 }
 

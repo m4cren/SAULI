@@ -1,9 +1,9 @@
 "use client";
 
-import { createContext, useEffect, useReducer, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useEffect, useReducer, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { claimantReducer, initialClaimantState } from "@/libs/claimant/claimantReducer";
 import { claimantService } from "@/libs/claimant/claimantService";
-import { claimantMockHistory } from "@/libs/claimant/claimantMockData";
+import { searchFoundItems } from "@/libs/api/sauli";
 import type {
   ClaimantState,
   MissingReport,
@@ -20,9 +20,6 @@ interface ClaimantContextValue {
   rejectCandidate: (itemId: string) => void;
   selectItem: (item: SearchResult) => void;
   postMissingReport: (input: { phone: string; smsEnabled: boolean; inAppEnabled: boolean }) => Promise<MissingReport>;
-  requestRetrievalPass: (item: SearchResult) => Promise<void>;
-  markPassExpired: () => void;
-  simulateStationQrScan: () => boolean;
   simulateWrongItemLifted: () => void;
   simulateWrongItemReturned: () => void;
   simulateCorrectItemLifted: (retriever: string) => void;
@@ -47,19 +44,20 @@ function isStoredState(value: unknown): value is ClaimantState {
 function loadInitialState(userId: string): ClaimantState {
   if (typeof window === "undefined") return initialClaimantState;
   try {
-    const raw = sessionStorage.getItem(`sauli-claimant-prototype-v1:${userId}`);
+    const raw = sessionStorage.getItem(`sauli-claimant-integration-v2:${userId}`);
     const parsed: unknown = raw ? JSON.parse(raw) : null;
     if (isStoredState(parsed)) return parsed;
   } catch {
     // Prototype state is disposable; a corrupt value starts a fresh session.
   }
-  return { ...initialClaimantState, retrievalHistory: claimantMockHistory };
+  return initialClaimantState;
 }
 
 export default function ClaimantProvider({ children, userId }: { children: ReactNode; userId: string }) {
   const [state, dispatch] = useReducer(claimantReducer, userId, loadInitialState);
   const ready = useSyncExternalStore(subscribeToBrowser, clientSnapshot, serverSnapshot);
-  const storageKey = `sauli-claimant-prototype-v1:${userId}`;
+  const storageKey = `sauli-claimant-integration-v2:${userId}`;
+  const searchKey = useRef<{ signature: string; key: string } | null>(null);
 
   useEffect(() => {
     if (ready) sessionStorage.setItem(storageKey, JSON.stringify(state));
@@ -69,10 +67,22 @@ export default function ClaimantProvider({ children, userId }: { children: React
     dispatch({ type: "FILTERS_UPDATED", filters });
     dispatch({ type: "SEARCH_STARTED" });
     try {
-      const results = await claimantService.searchItems({ ...state.searchDraft, filters });
+      const input = { description: state.searchDraft.description, category: filters.category || null,
+        color: filters.color || null, last_seen_location: filters.lastSeenLocation || null,
+        last_seen_at: filters.lastSeenAt ? new Date(filters.lastSeenAt).toISOString() : null,
+        additional_filters: { size: filters.size, brand: filters.brand } };
+      const signature = JSON.stringify(input);
+      if (searchKey.current?.signature !== signature) searchKey.current = { signature, key: crypto.randomUUID() };
+      const response = await searchFoundItems(input, searchKey.current.key);
+      const results: SearchResult[] = response.results.map((item) => ({
+        id: item.item_id, itemId: item.item_id, name: item.name, matchPercent: item.rank_score,
+        storageStatus: "stored", foundLocation: item.found_location, foundAt: item.found_at,
+        rank: item.rank, summary: item.summary, explanation: item.explanation,
+        matchedAttributes: item.matched_attributes, differences: item.differences, imageUrl: item.front_image_url,
+      }));
       dispatch({ type: "SEARCH_SUCCEEDED", results });
-    } catch {
-      dispatch({ type: "SEARCH_FAILED", message: "Search is unavailable. Please try again." });
+    } catch (error) {
+      dispatch({ type: "SEARCH_FAILED", message: error instanceof Error ? error.message : "Search is unavailable. Please try again." });
     }
   }
 
@@ -85,18 +95,6 @@ export default function ClaimantProvider({ children, userId }: { children: React
     return report;
   }
 
-  async function requestRetrievalPass(item: SearchResult) {
-    const pass = await claimantService.createRetrievalRequest(item);
-    dispatch({ type: "RETRIEVAL_PASS_CREATED", item, pass });
-  }
-
-  function simulateStationQrScan(): boolean {
-    const valid = state.retrievalStatus === "waitingForQrScan" &&
-      Boolean(state.retrievalPass && Date.now() < Date.parse(state.retrievalPass.expiresAt));
-    dispatch({ type: "STATION_SCAN_SIMULATED", at: Date.now() });
-    return valid;
-  }
-
   const value: ClaimantContextValue = {
     state,
     setDraft: (draft) => dispatch({ type: "DRAFT_UPDATED", draft }),
@@ -105,9 +103,6 @@ export default function ClaimantProvider({ children, userId }: { children: React
     rejectCandidate: (itemId) => dispatch({ type: "CANDIDATE_REJECTED", itemId }),
     selectItem: (item) => dispatch({ type: "ITEM_SELECTED", item }),
     postMissingReport,
-    requestRetrievalPass,
-    markPassExpired: () => dispatch({ type: "PASS_EXPIRED" }),
-    simulateStationQrScan,
     simulateWrongItemLifted: () => dispatch({ type: "WRONG_ITEM_LIFTED" }),
     simulateWrongItemReturned: () => dispatch({ type: "WRONG_ITEM_RETURNED", at: new Date().toISOString() }),
     simulateCorrectItemLifted: (retriever) => dispatch({ type: "CORRECT_ITEM_LIFTED", retriever, at: new Date().toISOString() }),

@@ -25,6 +25,8 @@ export type KioskAction =
   | { type: "EXTRA_NOTES_CHANGED"; value: string }
   | { type: "IDENTIFY_STARTED" }
   | { type: "IDENTIFIED"; review: ReviewFields }
+  | { type: "IDENTIFY_FAILED"; message: string }
+  | { type: "REVIEW_RECONCILED"; review: ReviewFields }
   | { type: "CORRECTION_NOTE_CHANGED"; value: string }
   | { type: "SAVE_REVIEW" }
   | { type: "RETAKE_PHOTOS" }
@@ -63,12 +65,14 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     case "IDENTIFY_STARTED": return screen.mode === "found" && screen.step === "foundLocation" && state.images.front && state.images.back && state.foundLocation.trim()
       ? { ...state, screen: { mode: "found", step: "identifying" }, error: null } : state;
     case "IDENTIFIED": return screen.mode === "found" && screen.step === "identifying" ? { ...state, screen: { mode: "found", step: "review" }, review: action.review } : state;
+    case "IDENTIFY_FAILED": return screen.mode === "found" && screen.step === "identifying" ? { ...state, screen: { mode: "found", step: "foundLocation" }, error: action.message } : state;
+    case "REVIEW_RECONCILED": return screen.mode === "found" && screen.step === "review" ? { ...state, screen: { mode: "found", step: "summary" }, review: action.review, error: null } : state;
     case "CORRECTION_NOTE_CHANGED": return screen.mode === "found" && screen.step === "review" ? { ...state, correctionNote: action.value } : state;
-    case "SAVE_REVIEW": return screen.mode === "found" && screen.step === "review" && Object.values(state.review).every((value) => value.trim())
+    case "SAVE_REVIEW": return screen.mode === "found" && screen.step === "review"
       ? { ...state, screen: { mode: "found", step: "summary" }, error: null } : state;
     case "RETAKE_PHOTOS": return screen.mode === "found" && !modal ? { ...state, screen: { mode: "found", step: "captureFront" }, images: { ...state.images, front: null, back: null }, error: null } : state;
-    case "FOUND_CONFIRMED": return screen.mode === "found" && screen.step === "summary" && state.review.name.trim() && state.review.summary.trim() && state.review.category.trim() && state.review.color.trim() && state.review.material.trim() && state.review.size.trim()
-      ? { ...state, screen: { mode: "found", step: "placement" }, error: null } : state;
+    case "FOUND_CONFIRMED": return screen.mode === "found" && screen.step === "summary"
+      ? { ...state, screen: { mode: "found", step: "stored" }, images: { ...state.images, front: null, back: null }, error: null } : state;
     case "WRONG_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, modal: "wrongPlacement" } : state;
     case "WRONG_PLACEMENT_REMOVED": return modal === "wrongPlacement" ? { ...state, modal: null } : state;
     case "CORRECT_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, screen: { mode: "found", step: "placementCorrect" } } : state;

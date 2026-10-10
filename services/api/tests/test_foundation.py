@@ -36,9 +36,17 @@ def make_app():
     ))
 
 
+def test_legacy_ollama_timeout_is_raised_for_vision():
+    assert Settings(ollama_timeout_seconds=5).ollama_timeout_seconds == 180
+    assert Settings(ollama_timeout_seconds=240).ollama_timeout_seconds == 240
+
+
 def test_health_starts_without_supabase_or_ollama():
     with TestClient(create_app(Settings())) as client:
-        assert client.get("/health").json() == {"status": "ok"}
+        health = client.get("/health").json()
+        assert health["status"] == "degraded"
+        assert health["api"] == "ready"
+        assert health["supabase_database"] == "unavailable"
 
 
 def test_missing_or_invalid_bearer_token():
