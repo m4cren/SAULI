@@ -264,6 +264,17 @@ class SupabaseFoundItemRepository:
             log.exception("Missing-report lookup failed")
             raise ServiceError("REPORT_STORAGE_UNAVAILABLE", "The missing-item report is unavailable.", 503) from exc
 
+    async def list_missing_reports(self, user_id: UUID) -> list[dict]:
+        try:
+            client = self.require()
+            response = await run_in_threadpool(lambda: client.table("missing_reports")
+                .select("id,search_request_id,summary,notification_email,email_notifications_enabled,status,created_at")
+                .eq("claimant_user_id", str(user_id)).order("created_at", desc=True).execute())
+            return response.data or []
+        except Exception as exc:
+            log.exception("Missing-report list failed")
+            raise ServiceError("REPORT_STORAGE_UNAVAILABLE", "Missing-item reports are unavailable.", 503) from exc
+
     async def get_match_decision(self, candidate_id: UUID) -> str | None:
         try:
             client = self.require()

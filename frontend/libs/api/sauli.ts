@@ -128,6 +128,9 @@ export async function createMissingReport(searchRequestId: string, email: string
 export async function getMissingReport(id: string) {
   return api<MissingReportDetail>(`/api/missing-reports/${encodeURIComponent(id)}`, { headers: await authHeaders() });
 }
+export async function listMissingReports() {
+  return api<MissingReportApi[]>("/api/missing-reports", { headers: await authHeaders() });
+}
 export async function decideMatch(candidateId: string, decision: "confirm" | "reject") {
   return api<ClaimDecision>(`/api/matches/${encodeURIComponent(candidateId)}/${decision}`, {
     method: "POST", headers: await authHeaders(),

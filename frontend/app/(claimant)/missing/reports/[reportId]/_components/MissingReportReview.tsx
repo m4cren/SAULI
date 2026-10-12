@@ -28,6 +28,7 @@ export default function MissingReportReview({ reportId }: { reportId: string }) 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [imageFailed, setImageFailed] = useState(false);
+  const [revision, setRevision] = useState(0);
   const router = useRouter();
 
   useEffect(() => {
@@ -38,7 +39,14 @@ export default function MissingReportReview({ reportId }: { reportId: string }) 
       if (active) setError(cause instanceof Error ? cause.message : "This report is unavailable.");
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [reportId]);
+  }, [reportId, revision]);
+
+  function refresh() {
+    setLoading(true);
+    setError(null);
+    setReport(null);
+    setRevision((value) => value + 1);
+  }
 
   async function decide(decision: "confirm" | "reject") {
     if (!report?.candidate || busy) return;
@@ -62,10 +70,13 @@ export default function MissingReportReview({ reportId }: { reportId: string }) 
   return <main className="sauli-page pb-8">
     <BackButton href="/">Home</BackButton>
     <h1 className="sauli-title mt-2">Missing-item report</h1>
+    <button type="button" onClick={refresh} disabled={loading} className="mt-2 min-h-11 text-sm font-semibold text-[#0B474F] underline disabled:opacity-60">Refresh status</button>
     {loading && <p role="status" className="mt-5">Loading your report…</p>}
     {error && <p role="alert" className="mt-5 text-sm text-red-700">{error}</p>}
     {report && <>
-      <p className="sauli-subtitle mt-1">{report.status === "active" ? "SAULI is watching for a possible match." : `Report ${report.status}.`}</p>
+      <p className="sauli-subtitle mt-1">{report.candidate ? "Possible match found. Review it below." :
+        report.candidate_decision === "accepted" ? "Match confirmed. Open your retrieval pass to continue." :
+        report.status === "active" ? "SAULI is watching for a possible match." : `Report ${report.status}.`}</p>
       <section className="sauli-card mt-5 p-4"><h2 className="text-xs font-bold text-[#0B474F]">YOUR MISSING ITEM</h2><p className="mt-2 text-sm">{report.summary}</p></section>
       {report.candidate ? <section className="sauli-card mt-5 p-4">
         <p className="text-xs font-bold uppercase text-[#267781]">Possible match · Review required</p>
@@ -84,6 +95,8 @@ export default function MissingReportReview({ reportId }: { reportId: string }) 
           <Button type="button" variant="outline" disabled={busy} onClick={() => void decide("reject")} className="w-full">Not mine</Button></div>
       </section> : <section className="sauli-card mt-5 p-5 text-sm">
         {report.candidate_decision === "accepted" ? "This match was confirmed. Open your retrieval pass to continue." :
+          report.status === "cancelled" ? "This report was cancelled and is no longer being monitored." :
+          report.status === "resolved" ? "This report was resolved and is no longer being monitored." :
           report.candidate_decision === "rejected" ? "You marked the previous item Not mine. SAULI will keep watching for another match." :
           "No unreviewed match is available yet. SAULI will keep monitoring newly placed items."}
       </section>}

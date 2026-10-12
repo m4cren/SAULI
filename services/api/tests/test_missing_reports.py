@@ -51,8 +51,14 @@ class ReportRepo:
         return row
 
     async def get_missing_report(self, report_id, user_id):
-        assert user_id == self.user_id
-        return next((row for row in self.rows.values() if row["id"] == str(report_id)), None)
+        return next((row for row in self.rows.values()
+                     if row["id"] == str(report_id)
+                     and row["claimant_user_id"] == str(user_id)), None)
+
+    async def list_missing_reports(self, user_id):
+        return sorted((row for row in self.rows.values()
+                       if row["claimant_user_id"] == str(user_id)),
+                      key=lambda row: row["created_at"], reverse=True)
 
     async def search_candidates(self, _search_id):
         return []
@@ -111,6 +117,17 @@ def test_authenticated_report_post_reuses_search_and_is_idempotent():
         assert detail.json()["candidate"] is None
         assert "claimant_user_id" not in detail.json()
         assert "idempotency_key" not in detail.json()
+        listed = client.get("/api/missing-reports")
+        assert listed.status_code == 200
+        assert listed.json() == [first.json()]
+        app.dependency_overrides[get_current_user] = lambda: UserResponse(
+            id=str(uuid4()), name="Another claimant", auth_provider="facebook"
+        )
+        assert client.get("/api/missing-reports").json() == []
+        assert client.get(f"/api/missing-reports/{first.json()['id']}").status_code == 404
+        app.dependency_overrides[get_current_user] = lambda: UserResponse(
+            id=str(user_id), name="Claimant", auth_provider="facebook"
+        )
         assert (
             client.post(
                 "/api/missing-reports",
@@ -150,6 +167,7 @@ def test_admin_and_non_facebook_accounts_cannot_post_or_view_claimant_reports():
                 headers={"X-Idempotency-Key": str(uuid4())},
             )
             assert response.status_code == 403
+            assert client.get("/api/missing-reports").status_code == 403
             assert client.get(f"/api/missing-reports/{uuid4()}").status_code == 403
     assert repo.rows == {}
 

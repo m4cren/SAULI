@@ -69,3 +69,33 @@ test("posted-report screen shows masked email, guidance, and accessible actions"
   assert.match(html, /href="\/missing\/reports\/report-id"[^>]*>View my report/);
   assert.match(html, /href="\/"[^>]*>Back to home/);
 });
+
+test("home report shortcut appears only after the account has a submitted report", () => {
+  function renderShortcut(reports) {
+    const Shortcut = loadComponent("app/(claimant)/_components/MissingReportsShortcut.tsx", {
+      "next/link": link,
+      "@/hooks/useMissingReports": { __esModule: true, default: () => ({ reports, loading: false, error: false, refresh() {} }) },
+    });
+    return renderToStaticMarkup(React.createElement(Shortcut));
+  }
+  assert.equal(renderShortcut([]), "");
+  assert.match(renderShortcut([{ id: "report-one" }]), /href="\/missing\/reports\/report-one"/);
+  assert.match(renderShortcut([{ id: "report-one" }, { id: "report-two" }]), /href="\/missing\/reports"/);
+});
+
+test("report list links to each submitted report and shows its stored status", () => {
+  const Reports = loadComponent("app/(claimant)/missing/reports/_components/MissingReportsPage.tsx", {
+    "next/link": link,
+    "@/app/components/BackButton": link,
+    "@/hooks/useMissingReports": { __esModule: true, default: () => ({
+      reports: [{ id: "report-one", summary: "Lost blue bottle", status: "active", created_at: "2026-10-12T00:00:00Z" }],
+      loading: false, error: false, refresh() {},
+    }) },
+    "@/libs/claimant/format": { formatDateTime: () => "Oct 12, 2026" },
+  });
+  const html = renderToStaticMarkup(React.createElement(Reports));
+  assert.match(html, /My missing item reports/);
+  assert.match(html, /href="\/missing\/reports\/report-one"/);
+  assert.match(html, /Lost blue bottle/);
+  assert.match(html, /active/);
+});

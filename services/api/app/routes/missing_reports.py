@@ -46,6 +46,13 @@ async def retry_unconfigured_email(request: Request,
     return {"queued": count}
 
 
+@router.get("", response_model=list[MissingReportResponse])
+async def list_reports(request: Request,
+                       user: Annotated[UserResponse, Depends(get_claimant_user)]):
+    rows = await request.app.state.items.list_missing_reports(UUID(user.id))
+    return [public_report_fields(row, MissingReportResponse) for row in rows]
+
+
 @router.get("/{report_id}", response_model=MissingReportDetailResponse)
 async def get_report(request: Request, report_id: UUID,
                      user: Annotated[UserResponse, Depends(get_claimant_user)]):
