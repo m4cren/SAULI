@@ -46,6 +46,15 @@ async def retry_unconfigured_email(request: Request,
     return {"queued": count}
 
 
+@router.post("/admin/retry-provider-denied-email/{report_id}")
+async def retry_provider_denied_email(request: Request, report_id: UUID,
+                                      _admin: Annotated[UserResponse, Depends(get_admin_user)]):
+    if not request.app.state.settings.emailjs_enabled or not request.app.state.settings.emailjs_configured:
+        raise ServiceError("EMAILJS_NOT_CONFIGURED", "Configure EmailJS before retrying.", 409)
+    count = await request.app.state.items.retry_provider_denied_email(report_id)
+    return {"queued": count}
+
+
 @router.get("", response_model=list[MissingReportResponse])
 async def list_reports(request: Request,
                        user: Annotated[UserResponse, Depends(get_claimant_user)]):

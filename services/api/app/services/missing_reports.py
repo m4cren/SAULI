@@ -15,6 +15,7 @@ from app.services.matching import (
     similarity,
 )
 
+
 def request_from_search(row: dict) -> SearchRequest:
     return SearchRequest.model_validate({
         "description": row["description"], "category": row.get("category"),
@@ -86,7 +87,7 @@ async def report_detail(repo, report: dict, min_score: float) -> dict:
             row = await repo.get_item(UUID(candidate["found_item_id"]))
             if row and eligible(row, None):
                 result = await mapped_result(repo, row, candidate)
-                return {**report, "candidate": result.model_dump(mode="json"),
+                return {**report, "candidate": result,
                         "candidate_decision": "pending"}
     reviewed = next((row for row in candidates if row["decision"] == "accepted"), None)
     reviewed = reviewed or next((row for row in candidates if row["decision"] == "rejected"), None)

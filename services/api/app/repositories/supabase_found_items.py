@@ -1,6 +1,7 @@
 """Server-only Supabase data and private Storage access."""
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from starlette.concurrency import run_in_threadpool
@@ -329,6 +330,24 @@ class SupabaseFoundItemRepository:
 
     async def retry_unconfigured_email(self) -> int:
         return await self.report_rpc("sauli_retry_unconfigured_email")
+
+    async def retry_provider_denied_email(self, report_id: UUID) -> int:
+        """Requeue a known pre-delivery 403 once an admin fixes EmailJS access."""
+        report = await self.get_missing_report(report_id)
+        if not report or report["status"] != "active" or not report["email_notifications_enabled"]:
+            return 0
+        try:
+            client = self.require()
+            response = await run_in_threadpool(lambda: client.table("email_notifications")
+                .update({"status": "pending", "next_attempt_at": datetime.now(UTC).isoformat(),
+                         "last_error": None, "provider_response": None})
+                .eq("missing_report_id", str(report_id)).eq("status", "failed")
+                .eq("last_error", "Provider HTTP 403").eq("provider_response", "403")
+                .select("id").execute())
+            return len(response.data or [])
+        except Exception as exc:
+            log.exception("Denied EmailJS notification retry failed")
+            raise ServiceError("REPORT_STORAGE_UNAVAILABLE", "The notification could not be requeued.", 503) from exc
 
     async def retrieval_rpc(self, name: str, params: dict) -> dict:
         try:

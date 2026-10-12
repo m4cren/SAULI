@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import httpx
@@ -13,6 +14,7 @@ from app.auth.dependencies import get_current_user
 from app.config import Settings
 from app.core.errors import ServiceError
 from app.main import create_app
+from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.auth import UserResponse
 from app.schemas.search import CandidateBatch, CandidateComparison
 from app.services.email_notifications import EmailJSClient, deliver_one, template_params
@@ -343,6 +345,49 @@ def test_report_review_hides_low_scoring_search_candidates():
     assert repo.lookups == []
 
 
+def test_report_detail_serializes_a_pending_candidate_without_a_500():
+    user_id, search_id, report_id, item_id, candidate_id = (uuid4() for _ in range(5))
+
+    class PendingRepo(ReportRepo):
+        async def search_candidates(self, _search_id):
+            return [{
+                "id": str(candidate_id), "found_item_id": str(item_id),
+                "rank": 1, "rank_score": 77.33, "decision": "pending",
+                "matched_attributes": ["blue"], "differences": [],
+                "explanation": "Visible details align",
+                "score_breakdown": {"ai_similarity": 0.9, "deterministic_features": 0.7,
+                                    "location_similarity": 0.5, "time_proximity": 0.5},
+            }]
+
+        async def get_item(self, _item_id):
+            return {
+                **item(), "id": str(item_id), "object_name": "Blue bottle",
+                "extraction_summary": "Blue reusable water bottle",
+            }
+
+        async def signed_url(self, _path):
+            return None
+
+    app = create_app(Settings())
+    repo = PendingRepo(user_id)
+    repo.rows[search_id] = {
+        "id": str(report_id), "search_request_id": str(search_id),
+        "claimant_user_id": str(user_id), "summary": "Lost blue bottle",
+        "notification_email": "owner@example.com", "email_notifications_enabled": True,
+        "status": "active", "created_at": datetime.now(UTC).isoformat(),
+    }
+    app.state.items = repo
+    app.dependency_overrides[get_current_user] = lambda: UserResponse(
+        id=str(user_id), name="Claimant", auth_provider="facebook"
+    )
+    with TestClient(app) as client:
+        response = client.get(f"/api/missing-reports/{report_id}")
+    assert response.status_code == 200
+    assert response.json()["candidate"]["item_id"] == str(item_id)
+    assert response.json()["candidate"]["match_candidate_id"] == str(candidate_id)
+    assert response.json()["candidate"]["found_at"].endswith("Z")
+
+
 class EmailRepo:
     def __init__(self):
         self.notice = {
@@ -487,6 +532,10 @@ def test_emailjs_payload_success_retry_and_permanent_failure():
     repo = EmailRepo()
     assert send_with_status(400, settings, repo) and repo.final[0][1] == "failed"
     repo = EmailRepo()
+    assert send_with_status(403, settings, repo) and repo.final[0][1:] == (
+        "failed", "Provider HTTP 403", "403"
+    )
+    repo = EmailRepo()
     assert (
         send_with_status(503, settings, repo) and repo.final[0][1] == "delivery_unknown"
     )
@@ -610,6 +659,87 @@ def test_same_claimed_notification_is_not_sent_twice():
         asyncio.run(client.aclose())
     assert len(requests) == 1
     assert repo.final[0][1] == "sent"
+
+
+def test_admin_can_requeue_only_the_known_provider_denial_for_one_report():
+    report_id, admin_id = uuid4(), uuid4()
+    settings = Settings(
+        emailjs_enabled=True, emailjs_service_id="service", emailjs_template_id="template",
+        emailjs_public_key="public", sauli_admin_user_id=str(admin_id),
+    )
+    app = create_app(settings)
+
+    class RetryRepo:
+        def __init__(self):
+            self.requested = []
+
+        async def retry_provider_denied_email(self, requested_id):
+            self.requested.append(requested_id)
+            return 1
+
+    repo = RetryRepo()
+    app.state.items = repo
+    app.dependency_overrides[get_current_user] = lambda: UserResponse(
+        id=str(admin_id), role="admin", auth_provider="email"
+    )
+    with TestClient(app) as client:
+        response = client.post(f"/api/missing-reports/admin/retry-provider-denied-email/{report_id}")
+        assert response.status_code == 200
+        assert response.json() == {"queued": 1}
+        app.dependency_overrides[get_current_user] = lambda: UserResponse(
+            id=str(uuid4()), auth_provider="facebook"
+        )
+        assert client.post(f"/api/missing-reports/admin/retry-provider-denied-email/{report_id}").status_code == 403
+    assert repo.requested == [report_id]
+
+
+def test_provider_denial_retry_filters_to_failed_403_and_active_report():
+    report_id = uuid4()
+
+    class FakeClient:
+        def __init__(self):
+            self.filters = []
+            self.payload = None
+
+        def table(self, name):
+            assert name == "email_notifications"
+            return self
+
+        def update(self, payload):
+            self.payload = payload
+            return self
+
+        def eq(self, field, value):
+            self.filters.append((field, value))
+            return self
+
+        def select(self, field):
+            assert field == "id"
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[{"id": str(uuid4())}])
+
+    repo = SupabaseFoundItemRepository(Settings())
+    fake_client = FakeClient()
+    repo.client = fake_client
+
+    async def active_report(_report_id):
+        return {"status": "active", "email_notifications_enabled": True}
+
+    repo.get_missing_report = active_report
+    assert asyncio.run(repo.retry_provider_denied_email(report_id)) == 1
+    assert set(fake_client.filters) == {
+        ("missing_report_id", str(report_id)), ("status", "failed"),
+        ("last_error", "Provider HTTP 403"), ("provider_response", "403"),
+    }
+    assert fake_client.payload["status"] == "pending"
+
+    async def closed_report(_report_id):
+        return {"status": "matched", "email_notifications_enabled": True}
+
+    repo.get_missing_report = closed_report
+    assert asyncio.run(repo.retry_provider_denied_email(report_id)) == 0
 
 
 def test_sql_outbox_claims_and_reset_cover_new_tables():
