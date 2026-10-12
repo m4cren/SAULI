@@ -27,7 +27,6 @@ export async function proxy(request: NextRequest) {
   if (claimantPage && !isFacebookClaimant(data?.claims)) {
     const login = new URL("/auth/login", request.url);
     login.searchParams.set("next", `${request.nextUrl.pathname}${request.nextUrl.search}`);
-    if (data?.claims) login.searchParams.set("error", "facebook-required");
     return NextResponse.redirect(login);
   }
   response.headers.set("Cache-Control", "private, no-store");

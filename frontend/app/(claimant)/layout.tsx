@@ -12,7 +12,7 @@ export default async function ClaimantLayout({ children }: { children: ReactNode
   const supabase = await createClient();
   const { data } = await supabase.auth.getUser();
   if (!data.user) redirect("/auth/login");
-  if (!isFacebookClaimant(data.user)) redirect("/auth/login?error=facebook-required");
+  if (!isFacebookClaimant(data.user)) redirect("/auth/login");
 
   return (
     <AuthProvider initialUser={data.user}>
