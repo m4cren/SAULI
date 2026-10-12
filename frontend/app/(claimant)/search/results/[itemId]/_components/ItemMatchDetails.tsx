@@ -10,14 +10,16 @@ import { formatDateTime } from "@/libs/claimant/format";
 import { useClaimant } from "@/hooks/useClaimant";
 
 export default function ItemMatchDetails({ itemId }: { itemId: string }) {
-  const { state, rejectCandidate, selectItem } = useClaimant();
+  const { state, rejectCandidate, confirmCandidate } = useClaimant();
   const [imageFailed, setImageFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const router = useRouter();
   const item = state.searchResults.find((result) => result.id === itemId && !state.rejectedCandidateIds.includes(result.id));
   if (!item) return <main className="sauli-page"><BackButton href="/search/results">Results</BackButton><p className="mt-8">This candidate is no longer available in your current search.</p></main>;
 
-  function confirm() { if (item) { selectItem(item); router.push("/retrieval/pass"); } }
-  function reject() { if (item) { rejectCandidate(item.id); router.push("/search/results"); } }
+  async function confirm() { if (!item || busy) return; setBusy(true); setError(null); try { await confirmCandidate(item); router.push("/retrieval/pass"); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create the retrieval QR."); setBusy(false); } }
+  async function reject() { if (!item || busy) return; setBusy(true); setError(null); try { await rejectCandidate(item); router.push("/search/results"); } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not reject the item."); setBusy(false); } }
 
   return <main className="sauli-page pb-6">
     <BackButton href="/search/results">Results</BackButton>
@@ -34,6 +36,7 @@ export default function ItemMatchDetails({ itemId }: { itemId: string }) {
     {!!item.matchedAttributes?.length && <p className="mt-3 text-sm"><strong>Matched: </strong>{item.matchedAttributes.join(", ")}</p>}
     {!!item.differences?.length && <p className="mt-2 text-sm"><strong>Differences: </strong>{item.differences.join(", ")}</p>}
     <p className="mt-5 rounded-[10px] border border-dashed border-[#aaa] p-3 text-[13px] leading-snug">The match rank score orders results. It does not confirm ownership.</p>
-    <div className="mt-8 space-y-2"><Button type="button" onClick={confirm} className="w-full">This is my item</Button><Button type="button" variant="outline" onClick={reject} className="w-full">Not mine</Button></div>
+    {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
+    <div className="mt-8 space-y-2"><Button type="button" onClick={confirm} disabled={busy} className="w-full">{busy ? "Saving decision…" : "This is my item"}</Button><Button type="button" variant="outline" onClick={reject} disabled={busy} className="w-full">Not mine</Button></div>
   </main>;
 }

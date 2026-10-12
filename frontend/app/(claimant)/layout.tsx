@@ -5,12 +5,14 @@ import ClaimantProvider from "@/providers/ClaimantProvider";
 import { createClient } from "@/libs/supabase/server";
 import AppHeader from "@/app/components/AppHeader";
 import BottomNavigation from "@/app/components/BottomNavigation";
+import { isFacebookClaimant } from "@/libs/auth/claimant";
 import MobilePageContainer from "@/app/components/MobilePageContainer";
 
 export default async function ClaimantLayout({ children }: { children: ReactNode }) {
   const supabase = await createClient();
   const { data } = await supabase.auth.getUser();
   if (!data.user) redirect("/auth/login");
+  if (!isFacebookClaimant(data.user)) redirect("/auth/login?error=facebook-required");
 
   return (
     <AuthProvider initialUser={data.user}>

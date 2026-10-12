@@ -25,8 +25,15 @@ export interface KioskState {
   modal: KioskModal;
   images: Record<ImageKind, string | null>;
   foundLocation: string;
-  extraNotes: string;
   review: ReviewFields;
   correctionNote: string;
   error: string | null;
+  qrErrorCode: string | null;
+  storageSize: StorageSize | null;
+  assignment: ConfirmedItem | null;
+  fullSize: StorageSize | null;
+  validatedRetrieval: ValidatedRetrieval | null;
 }
+import type { ConfirmedItem } from "@/libs/api/sauli";
+import type { ValidatedRetrieval } from "@/libs/api/sauli";
+import type { StorageSize } from "@/libs/storage/slots";

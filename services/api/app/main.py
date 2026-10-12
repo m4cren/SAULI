@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -11,7 +12,8 @@ from app.config import Settings
 from app.core.errors import ServiceError
 from app.integrations.ollama import OllamaGateway
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
-from app.routes import found_items, health, matches, me, ollama
+from app.routes import found_items, health, matches, me, missing_reports, ollama, retrieval_sessions, storage_slots
+from app.services.email_notifications import EmailJSClient, run_worker
 
 log = logging.getLogger("sauli.api")
 
@@ -25,9 +27,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             gateway = OllamaGateway(config.ollama_base_url, config.ollama_timeout_seconds)
             app.state.auth_http = auth_http
             app.state.ollama = gateway
+            sender = EmailJSClient(config)
+            live_repo = isinstance(app.state.items, SupabaseFoundItemRepository) and app.state.items.client is not None
+            worker = asyncio.create_task(run_worker(app.state.items, gateway, config, sender)) if live_repo else None
             try:
                 yield
             finally:
+                if worker:
+                    worker.cancel()
+                    try:
+                        await worker
+                    except asyncio.CancelledError:
+                        pass
+                await sender.close()
                 await gateway.close()
 
     app = FastAPI(title="SAULI API", lifespan=lifespan)
@@ -38,11 +50,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=list(config.cors_origins),
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Idempotency-Key"],
+        allow_headers=["Authorization", "Content-Type", "X-Idempotency-Key", "X-Retrieval-Action"],
     )
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError):
-        return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status_code)
+        return JSONResponse({"error": {"code": exc.code, "message": exc.message, **(exc.details or {})}}, status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, _exc: RequestValidationError):
@@ -58,6 +70,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ollama.router)
     app.include_router(found_items.router)
     app.include_router(matches.router)
+    app.include_router(missing_reports.router)
+    app.include_router(storage_slots.router)
+    app.include_router(retrieval_sessions.router)
     return app
 
 

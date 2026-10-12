@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -17,7 +17,7 @@ from app.integrations.ollama import OllamaGateway, first_json_object, response_p
 from app.main import create_app
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.found_items import FoundItemAnalysis
-from app.schemas.search import CandidateComparison, QueryAnalysis, SearchRequest
+from app.schemas.search import CandidateBatch, CandidateComparison, QueryAnalysis, SearchRequest
 from app.services.analysis import reconcile, safe_analysis
 from app.services.found_items import confirm_item, public_details
 from app.services.images import validate_image
@@ -39,7 +39,7 @@ def analysis():
         "brand": None, "model_or_variant": None, "visible_markings": [], "functional_components": [],
         "condition": "good", "condition_visibility": "two sides", "condition_confidence": "medium",
         "surface_assessments": [], "condition_details": [], "patterns": [], "distinctive_features": [],
-        "likely_use": "carrying water", "short_description": "Blue bottle", "confidence": "medium",
+        "likely_use": "carrying water", "short_description": "Blue bottle", "storage_size": "medium", "confidence": "medium",
         "needs_review": False, "uncertainty_notes": [], "extraction_summary": "Blue metal bottle",
         "received_view_count": 2,
         "view_observations": [{"image_index": index, "visible_region": "side", "image_quality": "clear",
@@ -69,6 +69,7 @@ class FakeRepo:
         self.rows = []
         self.search_row = None
         self.audits = []
+        self.slot = None
 
     async def find_by_key(self, key):
         return self.items.get(str(key))
@@ -81,11 +82,16 @@ class FakeRepo:
     async def remove(self, paths):
         self.removed.extend(paths)
 
-    async def insert_item(self, row):
+    async def reserve_item(self, row, size):
         if self.fail_insert:
             raise ServiceError("DATABASE_INSERT_FAILED", "Insert failed", 503)
+        row = {**row, "storage_size": size, "placement_status": "reserved"}
         self.items[row["idempotency_key"]] = row
-        return row
+        self.slot = {"code": "P-01" if size == "pocket" else "M-01", "size_class": size, "status": "reserved"}
+        return {"item": row, "slot": self.slot}
+
+    async def get_slot_for_item(self, _item_id):
+        return self.slot
 
     async def find_search_by_key(self, _key):
         return None
@@ -131,6 +137,16 @@ def test_ollama_wrappers_repair_and_timeout():
     result = asyncio.run(gateway.structured("model", "prompt", FoundItemAnalysis, [b"front", b"back"]))
     assert result.object_name == "Blue bottle" and gateway.client.calls == 2
 
+    class MissingSize:
+        calls = 0
+        async def chat(self, **_kwargs):
+            self.calls += 1
+            return {"message": {"content": analysis().model_dump_json(exclude={"storage_size"})}}
+    gateway.client = MissingSize()
+    with pytest.raises(ServiceError, match="MALFORMED_AI_RESPONSE"):
+        asyncio.run(gateway.structured("model", "prompt", FoundItemAnalysis))
+    assert gateway.client.calls == 2
+
     class Timeout:
         async def chat(self, **_kwargs):
             raise httpx.ReadTimeout("private host")
@@ -175,6 +191,7 @@ def test_analyze_api_preserves_order_and_safe_missing_images():
             "front_image": ("front.png", front, "image/png"), "back_image": ("back.png", back, "image/png")})
         assert result.status_code == 200
         assert gateway.images == [front, back]
+        assert result.json()["analysis"]["storage_size"] == "medium"
         extra = client.post("/api/found-items/analyze", data={"found_location": "Library"}, files={
             "front_image": ("front.png", front, "image/png"), "back_image": ("back.png", back, "image/png"),
             "third_image": ("third.png", front, "image/png")})
@@ -188,18 +205,18 @@ def test_confirmation_idempotency_and_cleanup(caplog):
     repo = FakeRepo()
     front = validate_image(png(), "image/png", Settings())
     key = uuid4()
-    saved = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis()))
-    duplicate = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis()))
+    saved = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis(), "pocket"))
+    duplicate = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis(), "pocket"))
     assert saved.item_id == duplicate.item_id and len(repo.uploaded) == 2
     repo = FakeRepo()
     repo.fail_upload_at = 2
     with pytest.raises(ServiceError, match="STORAGE_UPLOAD_FAILED"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis()))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket"))
     assert len(repo.removed) == 1
     repo = FakeRepo()
     repo.fail_insert = True
     with pytest.raises(ServiceError, match="DATABASE_INSERT_FAILED"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis()))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket"))
     assert len(repo.removed) == 2
     class CleanupFails(FakeRepo):
         async def remove(self, _paths):
@@ -207,7 +224,7 @@ def test_confirmation_idempotency_and_cleanup(caplog):
     repo = CleanupFails()
     repo.fail_upload_at = 2
     with pytest.raises(ServiceError, match="STORAGE_UPLOAD_FAILED"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis()))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket"))
     assert "cleanup failed" in caplog.text.lower()
 
 
@@ -219,7 +236,7 @@ def test_confirm_and_store_route_accepts_reviewed_analysis():
 
     def submit(client):
         return client.post("/api/found-items/confirm-and-store", headers={"X-Idempotency-Key": key},
-            data={"found_location": "Canteen", "notes": "Minor dent on top", "analysis_json": analysis().model_dump_json()},
+            data={"found_location": "Canteen", "notes": "Minor dent on top", "analysis_json": analysis().model_dump_json(), "storage_size": "pocket"},
             files={"front_image": ("front.png", png(), "image/png"),
                    "back_image": ("back.png", png(), "image/png")})
 
@@ -345,7 +362,7 @@ def test_optional_supabase_lookups_handle_no_row(response):
     repo.client = Client()
     expected = response.data if response is not None else None
     assert asyncio.run(repo.find_by_key(uuid4())) == expected
-    assert asyncio.run(repo.get_item(uuid4())) == expected
+    assert asyncio.run(repo.get_item(uuid4())) == ({**expected, "slot_status": None} if expected else None)
     assert asyncio.run(repo.find_search_by_key(uuid4())) == expected
 
 
@@ -353,16 +370,16 @@ def test_search_hard_eligibility_limit_and_audit():
     now = datetime.now(timezone.utc).isoformat()
     last_seen = datetime(2026, 1, 1, tzinfo=timezone.utc)
     assert not eligible({"status": "claimed", "found_at": now}, last_seen)
-    assert not eligible({"status": "available", "found_at": "2025-01-01T00:00:00+00:00"}, last_seen)
+    assert not eligible({"status": "available", "created_at": "2025-01-01T00:00:00+00:00"}, last_seen)
     candidate_id = uuid4()
     comparison = CandidateComparison(candidate_id=candidate_id, similarity=0.9, matched_attributes=["blue"],
                                      differences=[], explanation="Blue bottle matches", plausible=True)
     repo = FakeRepo()
-    repo.rows = [{"id": str(candidate_id), "status": "available", "found_at": now, "generic_name": "bottle",
+    repo.rows = [{"id": str(candidate_id), "status": "available", "placement_status": "placed", "slot_status": "occupied", "created_at": now, "found_at": now, "generic_name": "bottle",
                   "object_name": "Blue bottle", "category": "drinkware", "colors": ["blue"], "materials": ["metal"],
                   "found_location": "Library", "extraction_summary": "Blue bottle", "document_kind": "none",
                   "front_image_path": "private/front.png"},
-                 {"id": str(uuid4()), "status": "claimed", "found_at": now}]
+                 {"id": str(uuid4()), "status": "claimed", "created_at": now, "found_at": now}]
 
     class SearchGateway:
         async def structured(self, _model, _prompt, schema, images=None):
@@ -379,4 +396,133 @@ def test_search_hard_eligibility_limit_and_audit():
     assert result.results[0].rank_score == repo.audits[0]["rank_score"]
     assert repo.search_row["query_analysis"]["generic_name"] == "bottle"
     value, _ = score(comparison, 1, 1, 1)
-    assert value == 94.5
+    assert value == 92.0
+
+
+@pytest.mark.parametrize("omit_last_from_batch", [False, True])
+def test_qwen_compares_all_eligible_items_before_ranking(omit_last_from_batch):
+    now = datetime.now(timezone.utc).isoformat()
+    item_ids = [uuid4() for _ in range(6)]
+    repo = FakeRepo()
+    repo.rows = [{"id": str(item_id), "status": "available", "placement_status": "placed", "slot_status": "occupied", "created_at": now, "found_at": now,
+                  "generic_name": "watch" if index < 5 else "timepiece",
+                  "object_name": "Gold watch" if index < 5 else "Seiko diver",
+                  "category": "accessory", "colors": ["gold"] if index < 5 else [],
+                  "found_location": "Canteen", "extraction_summary": "Watch",
+                  "document_kind": "none", "front_image_path": None}
+                 for index, item_id in enumerate(item_ids)]
+
+    class RankingGateway:
+        def __init__(self):
+            self.compared = []
+
+        async def structured(self, _model, prompt, schema, images=None):
+            if schema is QueryAnalysis:
+                return QueryAnalysis(generic_name="watch", specific_description="gold Seiko watch",
+                    alternative_names=[], category="accessory", colors=["gold"], material=[], brand="Seiko",
+                    model=None, markings=[], distinctive_features=[], condition=[], damage=[], components=[],
+                    location=None, last_seen_at=None, searchable_summary="Gold Seiko watch", uncertainty=[])
+            assert "gold Seiko watch lost" in prompt
+            if schema is CandidateBatch:
+                candidates = json.loads(prompt.split("\nCandidates JSON:\n", 1)[1])
+                if omit_last_from_batch:
+                    candidates = candidates[:-1]
+            else:
+                assert schema is CandidateComparison
+                candidates = [json.loads(prompt.split("\nCandidate JSON:\n", 1)[1])]
+            self.compared.extend(item["id"] for item in candidates)
+            comparisons = [CandidateComparison(
+                candidate_id=UUID(item["id"]), similarity=0.95 if item["id"] == str(item_ids[-1]) else 0.1,
+                matched_attributes=["Seiko"] if item["id"] == str(item_ids[-1]) else [],
+                differences=[], explanation="Model comparison", plausible=False) for item in candidates]
+            return CandidateBatch(comparisons=comparisons) if schema is CandidateBatch else comparisons[0]
+
+    gateway = RankingGateway()
+    result = asyncio.run(run_search(repo, gateway, "qwen", SearchRequest(description="gold Seiko watch lost"), uuid4()))
+    assert set(gateway.compared) == {str(item_id) for item_id in item_ids}
+    assert str(result.results[0].item_id) == str(item_ids[-1])
+    assert len(result.results) == len(repo.audits) == 1
+
+
+def test_search_date_uses_database_registration_time_including_timezone_boundary():
+    row = {"status": "available", "placement_status": "placed", "slot_status": "occupied", "created_at": "2026-10-10T09:00:00+08:00",
+           "found_at": "2026-10-11T09:00:00+08:00"}
+    assert eligible(row, datetime.fromisoformat("2026-10-10T01:00:00+00:00"))
+    assert not eligible(row, datetime.fromisoformat("2026-10-10T01:00:01+00:00"))
+    assert not eligible({**row, "created_at": "invalid"}, None)
+
+
+def test_supabase_search_prefilters_by_database_registration_time():
+    calls = []
+
+    class Query:
+        def __init__(self, name):
+            self.name = name
+
+        def select(self, fields):
+            calls.append(("select", fields))
+            return self
+
+        def eq(self, field, value):
+            calls.append(("eq", field, value))
+            return self
+
+        def in_(self, field, values):
+            calls.append(("in", field, values))
+            return self
+
+        def gte(self, field, value):
+            calls.append(("gte", field, value))
+            return self
+
+        def order(self, field, desc=False):
+            calls.append(("order", field, desc))
+            return self
+
+        def limit(self, value):
+            calls.append(("limit", value))
+            return self
+
+        def execute(self):
+            rows = [{"current_found_item_id": "candidate"}] if self.name == "storage_slots" else [{"id": "candidate"}]
+            return SimpleNamespace(data=rows)
+
+    class Client:
+        def table(self, name):
+            calls.append(("table", name))
+            return Query(name)
+
+    repo = SupabaseFoundItemRepository(Settings())
+    repo.client = Client()
+    timestamp = "2026-10-10T01:00:01+00:00"
+    assert asyncio.run(repo.eligible_items(timestamp)) == [{"id": "candidate", "slot_status": "occupied"}]
+    assert ("gte", "created_at", timestamp) in calls
+    assert ("eq", "status", "available") in calls
+    assert ("order", "created_at", True) in calls
+    assert any("created_at" in call[1] for call in calls if call[0] == "select")
+
+
+def test_search_api_accepts_browser_iso_last_seen_time():
+    class QueryGateway:
+        async def structured(self, _model, _prompt, _schema, images=None):
+            return QueryAnalysis(generic_name="watch", specific_description="gold Seiko watch", alternative_names=[],
+                category="accessory", colors=["gold"], material=["metal"], brand="Seiko", model=None,
+                markings=[], distinctive_features=[], condition=[], damage=[], components=[], location=None,
+                last_seen_at=None, searchable_summary="Gold Seiko watch", uncertainty=[])
+
+    app = create_app(Settings())
+    repo = FakeRepo()
+    app.state.items = repo
+    with TestClient(app) as client:
+        app.state.ollama = QueryGateway()
+        response = client.post("/api/matches/search", headers={"X-Idempotency-Key": str(uuid4())}, json={
+            "description": "gold seiko watch", "last_seen_location": "Canteen",
+            "last_seen_at": "2026-10-10T08:00:00.000Z",
+        })
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+    assert repo.search_row["last_seen_at"] == "2026-10-10T08:00:00+00:00"
+    assert repo.search_row["last_seen_location"] == "Canteen"
+    assert repo.search_row["category"] is None and repo.search_row["color"] is None
+    assert repo.search_row["filters"] == {}

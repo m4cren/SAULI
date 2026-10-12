@@ -6,7 +6,7 @@ from fastapi import APIRouter, File, Form, Header, Request, UploadFile
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.core.errors import ServiceError
-from app.schemas.found_items import (AnalysisResponse, ConfirmedItemResponse, FoundItemDetailsResponse,
+from app.schemas.found_items import (AnalysisResponse, ConfirmedItemResponse, FoundItemDetailsResponse, SimulatePlacementRequest,
                                       ReconcileRequest, normalize_location_notes, strict_analysis_json)
 from app.services.analysis import analyze, reconcile, safe_analysis
 from app.services.found_items import confirm_item, public_details
@@ -61,13 +61,17 @@ async def reconcile_item(request: Request, payload: ReconcileRequest):
 @router.post("/confirm-and-store", response_model=ConfirmedItemResponse)
 async def confirm_and_store(request: Request, front_image: UploadFile | None = File(None), back_image: UploadFile | None = File(None),
                             found_location: str = Form(""), notes: str | None = Form(None), analysis_json: str = Form(""),
+                            storage_size: str = Form(""),
                             x_idempotency_key: str | None = Header(None)):
     key = required_key(x_idempotency_key)
     location, normalized_notes = location_notes(found_location, notes)
     existing = await request.app.state.items.find_by_key(key)
     if existing:
         from app.services.found_items import confirmed
-        return confirmed(existing)
+        slot = await request.app.state.items.get_slot_for_item(UUID(str(existing["id"])))
+        if not slot:
+            raise ServiceError("STORAGE_STATE_CONFLICT", "The assigned position is unavailable. Please try again.", 409)
+        return confirmed(existing, slot)
     await exact_image_pair(request)
     settings = request.app.state.settings
     front = await read_upload(front_image, "front", settings)
@@ -76,7 +80,14 @@ async def confirm_and_store(request: Request, front_image: UploadFile | None = F
         analysis = safe_analysis(strict_analysis_json(analysis_json))
     except (ValueError, TypeError) as exc:
         raise ServiceError("INVALID_ANALYSIS", "The item analysis is incomplete or invalid. Please analyze it again.", 422) from exc
-    return await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis)
+    return await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis, storage_size)
+
+
+@router.post("/{item_id}/simulate-placement", response_model=ConfirmedItemResponse)
+async def simulate_placement(request: Request, item_id: UUID, payload: SimulatePlacementRequest):
+    from app.services.found_items import confirmed
+    result = await request.app.state.items.simulate_placement(item_id, payload.slot_code)
+    return confirmed(result["item"], result["slot"])
 
 
 @router.get("/{item_id}", response_model=FoundItemDetailsResponse)

@@ -12,8 +12,12 @@ from app.services.images import ImageData
 log = logging.getLogger("sauli.found_items")
 
 
-def confirmed(row: dict) -> ConfirmedItemResponse:
-    return ConfirmedItemResponse(item_id=UUID(str(row["id"])), status="available", summary=row["extraction_summary"], found_location=row["found_location"], found_at=datetime.fromisoformat(str(row["found_at"]).replace("Z", "+00:00")))
+def confirmed(row: dict, slot: dict) -> ConfirmedItemResponse:
+    return ConfirmedItemResponse(item_id=UUID(str(row["id"])), status="available", summary=row["extraction_summary"],
+        found_location=row["found_location"], found_at=datetime.fromisoformat(str(row["found_at"]).replace("Z", "+00:00")),
+        storage_size=row["storage_size"], slot_code=slot["code"],
+        section="Pocket-size" if slot["size_class"] == "pocket" else "Medium-size",
+        slot_status=slot["status"], placement_status=row["placement_status"])
 
 
 def normalized_search_document(analysis: FoundItemAnalysis, location: str, notes: str | None) -> str:
@@ -24,10 +28,16 @@ def normalized_search_document(analysis: FoundItemAnalysis, location: str, notes
     return " ".join(" ".join(parts).lower().split())[:8000]
 
 
-async def confirm_item(repo, key: UUID, front: ImageData, back: ImageData, location: str, notes: str | None, analysis: FoundItemAnalysis) -> ConfirmedItemResponse:
+async def confirm_item(repo, key: UUID, front: ImageData, back: ImageData, location: str, notes: str | None,
+                       analysis: FoundItemAnalysis, storage_size: str) -> ConfirmedItemResponse:
+    if storage_size not in ("pocket", "medium"):
+        raise ServiceError("INVALID_STORAGE_SIZE", "Choose pocket-size or medium-size storage before confirming.", 422)
     prior = await repo.find_by_key(key)
     if prior:
-        return confirmed(prior)
+        slot = await repo.get_slot_for_item(UUID(str(prior["id"])))
+        if not slot:
+            raise ServiceError("STORAGE_STATE_CONFLICT", "The assigned position is unavailable. Please try again.", 409)
+        return confirmed(prior, slot)
     item_id = uuid4()
     front_path = f"found-items/{item_id}/front.{front.extension}"
     back_path = f"found-items/{item_id}/back.{back.extension}"
@@ -54,18 +64,20 @@ async def confirm_item(repo, key: UUID, front: ImageData, back: ImageData, locat
             "search_document": normalized_search_document(analysis, location, notes),
             "front_image_path": front_path, "back_image_path": back_path,
         }
-        inserted = await repo.insert_item(row)
-        return confirmed(inserted)
+        assigned = await repo.reserve_item(row, storage_size)
+        return confirmed(assigned["item"], assigned["slot"])
     except Exception as exc:
+        if isinstance(exc, ServiceError) and exc.code == "DATABASE_INSERT_FAILED":
+            prior = await repo.find_by_key(key)
+            if prior:
+                slot = await repo.get_slot_for_item(UUID(str(prior["id"])))
+                if slot:
+                    return confirmed(prior, slot)
         if uploaded:
             try:
                 await repo.remove(uploaded)
             except Exception:
                 log.exception("Private image cleanup failed for %s object(s)", len(uploaded))
-        if isinstance(exc, ServiceError) and exc.code == "DATABASE_INSERT_FAILED":
-            prior = await repo.find_by_key(key)
-            if prior:
-                return confirmed(prior)
         if isinstance(exc, ServiceError):
             raise
         log.exception("Unexpected found-item save failure")

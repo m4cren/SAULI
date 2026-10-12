@@ -40,15 +40,24 @@ async def verify_supabase_user(
         if not isinstance(user_id, str) or not user_id:
             raise ValueError("Missing user id")
         metadata = payload.get("user_metadata") or {}
+        app_metadata = payload.get("app_metadata") or {}
         if not isinstance(metadata, dict):
             metadata = {}
+        if not isinstance(app_metadata, dict):
+            app_metadata = {}
         name = metadata.get("full_name") or metadata.get("name")
         avatar = metadata.get("avatar_url") or metadata.get("picture")
+        # Keep SAULI authorization separate from Supabase's built-in JWT role,
+        # which PostgREST uses for database access.
+        sauli_role = app_metadata.get("sauli_role")
+        legacy_role = app_metadata.get("role")
         return UserResponse(
             id=user_id,
             email=payload.get("email") or None,
             name=name if isinstance(name, str) else None,
             avatar_url=avatar if isinstance(avatar, str) else None,
+            role=sauli_role if isinstance(sauli_role, str) else ("admin" if legacy_role == "admin" else None),
+            auth_provider=app_metadata.get("provider") if isinstance(app_metadata.get("provider"), str) else None,
         )
     except (ValueError, TypeError, KeyError) as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Authentication service unavailable") from exc

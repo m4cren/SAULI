@@ -1,6 +1,6 @@
 # SAULI local development
 
-This foundation uses Next.js 16 in `frontend/`, FastAPI in `services/api/`, Supabase Auth for Facebook sign-in, and an optional Ollama server. The signed-in landing page is `/`; `/auth/login` is public. Admin and kiosk routes have no role authorization in this phase.
+This foundation uses Next.js 16 in `frontend/`, FastAPI in `services/api/`, Supabase Auth for Facebook sign-in, and an optional Ollama server. The signed-in landing page is `/`; `/auth/login` is public. Administrator sign-in uses `/auth/admin`; see [admin account setup](../services/README.md#dedicated-administrator-account).
 
 ## Environment
 
@@ -95,6 +95,7 @@ The frontend's typed `getMe()` and `getOllamaStatus()` helpers in `frontend/libs
 - **App not set up / permission error:** Check Meta app mode, assigned test roles, accepted invitations, and `public_profile`/`email` readiness.
 - **Sign-in returns to login:** Check browser cookies, project URL/key consistency, and the callback exchange. The callback shows a friendly message if consent was denied or exchange failed.
 - **API `401`:** Use a current Supabase application access token. A Facebook provider token is not accepted.
+- **Admin API `403`:** Sign-in worked, but this is not the dedicated admin account. Sign in at `/auth/admin` with the admin credentials. If that account still receives 403, check that both servers have the same `SAULI_ADMIN_USER_ID` and restart them. See [admin account setup](../services/README.md#dedicated-administrator-account).
 - **API `503`:** Check backend Supabase configuration or Auth availability. For Ollama status, check `OLLAMA_BASE_URL` and connectivity from the API host.
 - **API `504`:** Increase `OLLAMA_TIMEOUT_SECONDS` or fix a slow/unreachable Ollama host.
 - **CORS error:** Add the exact frontend origin to `CORS_ORIGINS` and restart FastAPI.

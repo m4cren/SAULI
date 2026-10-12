@@ -2,9 +2,11 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useAuth } from "@/hooks/useAuth";
 import BrandFrame from "@/app/components/BrandFrame";
 import FacebookLoginButton from "./FacebookLoginButton";
+import { isFacebookClaimant } from "@/libs/auth/claimant";
 
 export default function LoginPage({
   next,
@@ -16,8 +18,12 @@ export default function LoginPage({
   const { user } = useAuth();
   const router = useRouter();
   useEffect(() => {
-    if (user) router.replace(next);
+    if (isFacebookClaimant(user)) router.replace(next);
   }, [user, next, router]);
+
+  const accountMessage = user && !isFacebookClaimant(user)
+    ? "This account is not signed in with Facebook. Continue with Facebook to use the claimant app."
+    : message;
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[428px] flex-col bg-[var(--sauli-background)] px-8 pb-10 shadow-[0_0_35px_rgba(0,0,0,0.08)]">
@@ -27,8 +33,9 @@ export default function LoginPage({
         <section className="rounded-[12px] bg-white px-[30px] py-[60px] shadow-[0_3px_4px_rgba(0,0,0,0.16)]">
           <h1 className="text-[23px] font-semibold leading-tight">Welcome</h1>
           <p className="text-[15px] tracking-[0.02em]">Sign in to search and retrieve an item.</p>
-          {message && <p role="alert" className="mt-5 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{message}</p>}
+          {accountMessage && <p role="alert" className="mt-5 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{accountMessage}</p>}
           <div className="mt-8"><FacebookLoginButton next={next} /></div>
+          <Link href="/auth/admin" className="mt-5 block text-center text-sm text-[var(--sauli-brand)] underline underline-offset-4">Administrator sign in</Link>
         </section>
       </div>
       <p className="mt-[min(14vh,125px)] text-center text-xs text-[#4e4e4e]">By continuing, you agree to SAULI&apos;s Terms and Privacy Policy.</p>

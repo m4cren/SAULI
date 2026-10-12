@@ -71,6 +71,7 @@ class FoundItemAnalysis(StrictModel):
     distinctive_features: TextList
     likely_use: Text
     short_description: Text
+    storage_size: Literal["pocket", "medium"]
     confidence: Confidence
     needs_review: bool
     uncertainty_notes: TextList
@@ -106,6 +107,15 @@ class ConfirmedItemResponse(StrictModel):
     summary: str
     found_location: str
     found_at: AwareDatetime
+    storage_size: Literal["pocket", "medium"]
+    slot_code: str
+    section: str
+    slot_status: Literal["reserved", "occupied"]
+    placement_status: Literal["reserved", "placed"]
+
+
+class SimulatePlacementRequest(StrictModel):
+    slot_code: Annotated[str, StringConstraints(pattern=r"^(P-(0[1-9]|10)|M-0[1-5])$")]
 
 
 class FoundItemDetailsResponse(StrictModel):

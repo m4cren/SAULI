@@ -1,5 +1,5 @@
-import RetrievedPage from "./_components/RetrievedPage";
+import RetrievalPassPage from "../pass/_components/RetrievalPassPage";
 
 export default function Page() {
-  return <RetrievedPage />;
+  return <RetrievalPassPage />;
 }

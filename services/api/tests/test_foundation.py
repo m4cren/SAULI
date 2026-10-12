@@ -1,5 +1,5 @@
-from fastapi.testclient import TestClient
 import httpx
+from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
@@ -62,14 +62,36 @@ def test_me_uses_supabase_auth_user_endpoint():
     app = make_app()
     with TestClient(app) as client:
         auth = FakeAuthClient(httpx.Response(200, json={
-            "id": "user-1", "email": None, "user_metadata": {"full_name": "Alex"},
+            "id": "user-1", "email": None,
+            "app_metadata": {"provider": "facebook"},
+            "user_metadata": {"full_name": "Alex"},
         }))
         app.state.auth_http = auth
         result = client.get("/api/v1/me", headers={"Authorization": "Bearer app-access-token"})
         assert result.status_code == 200
-        assert result.json() == {"id": "user-1", "email": None, "name": "Alex", "avatar_url": None}
+        assert result.json() == {"id": "user-1", "email": None, "name": "Alex", "avatar_url": None, "role": None, "auth_provider": "facebook"}
         assert auth.url == "https://project.supabase.co/auth/v1/user"
         assert auth.headers == {"apikey": "public-key", "Authorization": "Bearer app-access-token"}
+
+
+def test_sauli_admin_role_uses_trusted_app_metadata_without_changing_supabase_role():
+    app = make_app()
+    with TestClient(app) as client:
+        app.state.auth_http = FakeAuthClient(httpx.Response(200, json={
+            "id": "admin-1", "app_metadata": {"role": "authenticated", "sauli_role": "admin"},
+        }))
+        result = client.get("/api/v1/me", headers={"Authorization": "Bearer app-access-token"})
+        assert result.status_code == 200
+        assert result.json()["role"] == "admin"
+        assert result.json()["auth_provider"] is None
+
+        app.state.auth_http = FakeAuthClient(httpx.Response(200, json={
+            "id": "user-1", "app_metadata": {"role": "authenticated"},
+            "user_metadata": {"sauli_role": "admin"},
+        }))
+        result = client.get("/api/v1/me", headers={"Authorization": "Bearer app-access-token"})
+        assert result.status_code == 200
+        assert result.json()["role"] is None
 
 
 def test_auth_service_failure_is_not_reported_as_bad_credentials():

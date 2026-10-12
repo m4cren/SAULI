@@ -1,48 +1,37 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import Icon from "@/app/components/Icon";
 import { useClaimant } from "@/hooks/useClaimant";
-import { useAuth } from "@/hooks/useAuth";
-import { displayName } from "@/libs/types/auth";
+import useRetrievalPolling from "../../_hooks/useRetrievalPolling";
 import ContainerMap from "./ContainerMap";
-import PrototypeSensorControls from "./PrototypeSensorControls";
-import WrongItemModal from "./WrongItemModal";
+import WrongItemWarning from "./WrongItemWarning";
 
 export default function ItemLocationPage() {
-  const { state, simulateWrongItemLifted, simulateWrongItemReturned, simulateCorrectItemLifted } = useClaimant();
-  const { user } = useAuth();
-  const router = useRouter();
-  const modalOpen = state.retrievalStatus === "waitingForWrongItemReturn";
+  const { state } = useClaimant();
+  const session = state.retrievalSession;
+  const syncError = useRetrievalPolling(session?.id ?? null);
 
-  if (!state.retrievalPass || !["waitingForCorrectItem", "waitingForWrongItemReturn"].includes(state.retrievalStatus)) {
-    return <main className="sauli-page"><h1 className="sauli-title">Station scan required</h1><p className="mt-3 text-sm">Use the prototype station scan control on your retrieval pass first.</p><Link href="/retrieval/pass" className="mt-4 inline-block text-[var(--sauli-brand)]">View retrieval pass</Link></main>;
-  }
+  if (session?.status !== "validated") return <main className="sauli-page" role="status">Opening your retrieval status…</main>;
+  if (!session.slotCode || !session.section) return <main className="sauli-page"><h1 className="sauli-title">QR verified</h1><p className="mt-3 text-sm">Waiting for the kiosk to share your storage position.</p>{syncError && <p role="status" className="mt-3 text-sm text-amber-800">Reconnecting to the kiosk status…</p>}</main>;
 
-  function correctItemLifted() {
-    simulateCorrectItemLifted(user ? displayName(user) : "SAULI user");
-    router.push("/retrieval/complete");
-  }
-
-  return (
-    <>
-      <main inert={modalOpen} aria-hidden={modalOpen} className="sauli-page pb-6 text-center">
-        <div className="mx-auto mt-3 flex size-[65px] items-center justify-center rounded-full bg-[#cde2df] text-[#1a9b8e]"><Icon name="check" size={34} /></div>
-        <p className="sauli-eyebrow mt-1">QR VERIFIED · DOOR READY</p>
-        <h1 className="sauli-title mt-1">Locate your item</h1>
-        <p className="sauli-subtitle mt-1">The station accepted your retrieval pass. Your item is in</p>
-        <section className="mt-5 rounded-[8px] border border-[#2c737b] bg-white px-3 py-5"><p className="sauli-eyebrow text-[11px]">POCKET-SIZE SECTION</p><p className="mt-1 text-[49px] font-bold leading-none text-[#333]">P-05</p><p className="mt-1 text-[11px] text-[#888]">Left cabinet · Row C · Pocket 05</p></section>
-        <ContainerMap />
-        <ol className="mt-3 space-y-2 text-left">{[
-          ["QR code verified", "Your identity and claim have been accepted"],
-          ["Open the pocket-size door", "Follow the highlighted location to compartment P-05."],
-          ["Lift only your item", "The station will confirm the removal."],
-        ].map(([title, description], index) => <li key={title} className="flex items-start gap-2"><span className="flex size-7 shrink-0 items-center justify-center rounded-full border border-[#333] text-sm">{index + 1}</span><span><strong className="block text-[13px] font-medium tracking-[0.06em]">{title}</strong><span className="block text-[10px] tracking-[0.05em] text-[#666]">{description}</span></span></li>)}</ol>
-        <PrototypeSensorControls simulateWrongItemLifted={simulateWrongItemLifted} simulateCorrectItemLifted={correctItemLifted} />
-        <p aria-live="polite" className="sr-only">Waiting for P-05, Black leather wallet.</p>
-      </main>
-      {modalOpen && <WrongItemModal onReturned={simulateWrongItemReturned} />}
-    </>
-  );
+  const section = session.section === "pocket" ? "Pocket-size" : "Medium-size";
+  return <main className="sauli-page pb-9 text-center">
+    <div className="mx-auto mt-1 flex size-14 items-center justify-center rounded-full bg-[#d5eae7] text-[#0b7776]"><Icon name="check" size={34} /></div>
+    <p className="sauli-eyebrow mt-3">QR verified · Door ready (simulation)</p>
+    <h1 className="sauli-title mt-2">Locate your item</h1>
+    <p className="sauli-subtitle mt-2">The station accepted your retrieval pass. Your item is in</p>
+    <section className="sauli-card mt-5 border-[#5ca7a3] p-5">
+      <p className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#287981]">{section} section</p>
+      <p className="mt-1 text-5xl font-bold tracking-[-0.06em] text-[#092a2f]">{session.slotCode}</p>
+      <p className="mt-2 text-xs text-[#666]">{session.itemSummary}</p>
+    </section>
+    <ContainerMap highlightedCode={session.slotCode} />
+    <ol className="mt-5 space-y-3 text-left text-sm">
+      <li className="flex gap-3"><span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-[#0b474f] text-xs">1</span><span><strong>QR verified.</strong><br /><span className="text-xs text-[#555]">Your claim has been accepted at the kiosk.</span></span></li>
+      <li className="flex gap-3"><span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-[#0b474f] text-xs">2</span><span><strong>Find position {session.slotCode}.</strong><br /><span className="text-xs text-[#555]">Use the highlighted {section.toLowerCase()} compartment.</span></span></li>
+      <li className="flex gap-3"><span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-[#0b474f] text-xs">3</span><span><strong>Lift only your item.</strong><br /><span className="text-xs text-[#555]">The kiosk will record the removal simulation.</span></span></li>
+    </ol>
+    {syncError && <p role="status" className="mt-5 text-sm text-amber-800">Reconnecting to the kiosk status…</p>}
+    {session.wrongItemOut && <WrongItemWarning slotCode={session.slotCode} />}
+  </main>;
 }

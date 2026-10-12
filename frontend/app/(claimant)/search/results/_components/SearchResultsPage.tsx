@@ -31,7 +31,7 @@ export default function SearchResultsPage() {
 
       {(state.searchStatus === "results" || state.searchStatus === "empty") && (
         <section className="mt-6 rounded-[11px] border border-dashed border-[#a8a8a8] p-3.5">
-          <div className="flex gap-3"><Icon name="plus" size={30} /><div><h2 className="text-[15px] font-medium">Item not here yet?</h2><p className="mt-1 text-[13px] leading-snug text-[#666]">You can leave a prototype missing-item report while monitoring is being developed.</p></div></div>
+          <div className="flex gap-3"><Icon name="plus" size={30} /><div><h2 className="text-[15px] font-medium">Item not here yet?</h2><p className="mt-1 text-[13px] leading-snug text-[#666]">Post a missing-item report so SAULI can monitor newly placed items.</p></div></div>
           <Link href="/missing/report" className="mt-3 flex min-h-11 items-center justify-center rounded-md border border-[var(--sauli-brand)] bg-white text-sm font-semibold text-[var(--sauli-brand)] focus-visible:outline-2 focus-visible:outline-[var(--sauli-brand)]">Post missing item</Link>
         </section>
       )}

@@ -1,5 +1,6 @@
 """Search extraction, comparison and public result contracts."""
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -37,6 +38,10 @@ class CandidateComparison(StrictModel):
     plausible: bool
 
 
+class CandidateBatch(StrictModel):
+    comparisons: list[CandidateComparison]
+
+
 class SearchRequest(StrictModel):
     description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=4, max_length=2500)]
     category: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None = None
@@ -44,6 +49,13 @@ class SearchRequest(StrictModel):
     last_seen_location: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None = None
     last_seen_at: AwareDatetime | None = None
     additional_filters: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("last_seen_at", mode="before")
+    @classmethod
+    def parse_iso_last_seen_at(cls, value: datetime | str | None) -> datetime | None:
+        if isinstance(value, str):
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
 
     @field_validator("additional_filters")
     @classmethod
@@ -62,6 +74,7 @@ class ScoreBreakdown(StrictModel):
 
 class SearchResult(StrictModel):
     item_id: UUID
+    match_candidate_id: UUID
     rank: int = Field(ge=1)
     rank_score: float = Field(ge=0, le=100)
     name: str
@@ -79,3 +92,11 @@ class SearchResponse(StrictModel):
     search_request_id: UUID
     query: dict[str, str | None]
     results: list[SearchResult]
+
+
+class ClaimDecisionResponse(StrictModel):
+    match_candidate_id: UUID
+    decision: Annotated[str, StringConstraints(pattern=r"^(accepted|rejected)$")]
+    item_id: UUID | None = None
+    slot_code: str | None = None
+    section: str | None = None

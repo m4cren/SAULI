@@ -1,6 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { getSupabaseConfig } from "@/libs/supabase/config";
+import { isFacebookClaimant } from "@/libs/auth/claimant";
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -20,11 +21,19 @@ export async function proxy(request: NextRequest) {
     },
   });
 
-  await supabase.auth.getClaims();
+  const { data } = await supabase.auth.getClaims();
+  const pathname = request.nextUrl.pathname;
+  const claimantPage = pathname === "/" || /^(\/search|\/missing|\/retrieval|\/history)(\/|$)/.test(pathname);
+  if (claimantPage && !isFacebookClaimant(data?.claims)) {
+    const login = new URL("/auth/login", request.url);
+    login.searchParams.set("next", `${request.nextUrl.pathname}${request.nextUrl.search}`);
+    if (data?.claims) login.searchParams.set("error", "facebook-required");
+    return NextResponse.redirect(login);
+  }
   response.headers.set("Cache-Control", "private, no-store");
   return response;
 }
 
 export const config = {
-  matcher: ["/", "/auth/:path*", "/search/:path*", "/missing/:path*", "/retrieval/:path*", "/history/:path*"],
+  matcher: ["/", "/auth/:path*", "/admin/:path*", "/search/:path*", "/missing/:path*", "/retrieval/:path*", "/history/:path*"],
 };

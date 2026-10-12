@@ -7,9 +7,12 @@ Keep well-supported facts unrelated to the correction. Apply corrected facts to
 names, attributes, condition, damage, lists, short_description, and
 extraction_summary consistently. Remove superseded facts and stale
 contradictions wherever they occur. Preserve exactly two view_observations,
-one for each original image, without inventing new visual evidence. If the
-correction changes a damage assessment, remove contradictory old damage from
-surface_assessments and observations. A finder correction is reported evidence,
+one for each original image, without inventing new visual evidence. Preserve
+storage_size unless the corrected facts change the item's likely physical size.
+If they do, choose "pocket" or "medium" using the same whole-item sizing rule
+as the original analysis. If the correction changes a damage assessment, remove
+contradictory old damage from surface_assessments and observations. A finder
+correction is reported evidence,
 not a fresh image observation. If a new damage detail comes only from the
 correction, describe it as finder-reported in condition_details, uncertainty_notes,
 and the summary; do not claim it was seen in either image or add it to

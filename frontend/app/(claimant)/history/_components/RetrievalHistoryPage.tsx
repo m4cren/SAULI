@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Icon from "@/app/components/Icon";
-import { useClaimant } from "@/hooks/useClaimant";
+import { getClaimantRetrievalHistory } from "@/libs/api/sauli";
 import { formatDateTime } from "@/libs/claimant/format";
-import type { RetrievalRecord } from "@/libs/claimant/types";
+import type { CompartmentId, RetrievalRecord } from "@/libs/claimant/types";
 
 type Filter = "all" | "month" | "search";
 
@@ -24,12 +24,27 @@ function HistoryCard({ record }: { record: RetrievalRecord }) {
 }
 
 export default function RetrievalHistoryPage() {
-  const { state } = useClaimant();
+  const [history, setHistory] = useState<RetrievalRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  useEffect(() => {
+    let active = true;
+    void getClaimantRetrievalHistory().then((rows) => {
+      if (!active) return;
+      setHistory(rows.map((row) => ({ id: row.id, itemName: row.item_summary,
+        compartmentId: row.slot_code as CompartmentId, retriever: row.retriever, recordedAt: row.retrieved_at })));
+      setError(null);
+    }).catch((cause) => {
+      if (active) setError(cause instanceof Error ? cause.message : "Retrieval history is unavailable.");
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [retry]);
   const nowMonth = new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", year: "numeric", month: "numeric" }).format(new Date());
   const monthOf = (iso: string) => new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", year: "numeric", month: "numeric" }).format(new Date(iso));
-  const records = [...state.retrievalHistory]
+  const records = [...history]
     .sort((a, b) => Date.parse(b.recordedAt) - Date.parse(a.recordedAt))
     .filter((record) => filter !== "month" || monthOf(record.recordedAt) === nowMonth)
     .filter((record) => filter !== "search" || `${record.itemName} ${record.retriever} ${record.compartmentId}`.toLowerCase().includes(query.trim().toLowerCase()));
@@ -45,11 +60,13 @@ export default function RetrievalHistoryPage() {
         ))}
       </div>
       {filter === "search" && <div className="mt-3"><label htmlFor="history-query" className="sr-only">Search retrieval records</label><input id="history-query" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Item, retriever, or compartment" className="sauli-field" /></div>}
+      {error && <p role="alert" className="mt-4 text-sm text-red-700">{error} <button type="button" className="underline" onClick={() => { setLoading(true); setRetry((value) => value + 1); }}>Retry</button></p>}
       <div aria-live="polite" className="mt-5 space-y-2.5">
+        {loading && <p role="status" className="sauli-card p-6 text-center text-sm">Loading retrieval history…</p>}
         {records.map((record) => <HistoryCard key={record.id} record={record} />)}
-        {records.length === 0 && <div className="sauli-card p-6 text-center text-sm text-[#555]">No retrieval records found.</div>}
+        {!loading && !error && records.length === 0 && <div className="sauli-card p-6 text-center text-sm text-[#555]">No retrieval records found.</div>}
       </div>
-      <p className="mt-4 text-center text-[10px] text-[#777]">Prototype records are stored in this browser session.</p>
+      <p className="mt-4 text-center text-[10px] text-[#777]">Completed retrievals recorded by SAULI.</p>
     </main>
   );
 }

@@ -1,5 +1,5 @@
-import ItemLocationPage from "./_components/ItemLocationPage";
+import RetrievalPassPage from "../pass/_components/RetrievalPassPage";
 
 export default function Page() {
-  return <ItemLocationPage />;
+  return <RetrievalPassPage />;
 }

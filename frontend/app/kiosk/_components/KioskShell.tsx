@@ -29,7 +29,7 @@ export default function KioskShell() {
       case "summary": content = <IdentificationSummary />; break;
       case "review": content = <IdentificationReview />; break;
       case "placement": content = <PlacementScreen />; break;
-      case "placementCorrect": content = <PlacementScreen correct />; break;
+      case "placementCorrect": content = <PlacementScreen />; break;
       case "stored": content = <CompletionScreen kind="stored" />; break;
       case "noSlots": content = <CompletionScreen kind="noSlots" />; break;
     }

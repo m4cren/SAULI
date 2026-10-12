@@ -93,13 +93,23 @@ the component matters, include it in the string, for example "body: coated
 metal" or "lid: plastic". If material cannot be confirmed visually, describe it
 as likely or leave the array empty rather than claiming certainty.
 
+6. STORAGE SIZE
+Choose exactly one storage_size for the whole item, including handles, straps,
+or other attached parts. Use "pocket" for small personal objects such as a
+wristwatch, keys, jewelry, a wallet, or a phone. Use "medium" for bulkier
+objects such as a water bottle, lunchbox, book, bag, or clothing. Judge the
+item's likely real-world dimensions from its type and visible features, not
+from how many pixels it occupies in the photograph. If scale or fit is unclear,
+choose the safer medium size and explain the uncertainty in uncertainty_notes.
+This is an estimate; do not claim a measured fit from photographs.
+
 Return every one of these fields:
 views_consistent, generic_name, object_name, alternative_names, object_count,
 component_counts, count_is_estimate, count_confidence, counting_notes,
 category, subcategory, document_kind, document_owner_name, colors, material, brand, model_or_variant,
 visible_markings, functional_components, condition, condition_visibility,
 condition_confidence, surface_assessments, condition_details, patterns,
-distinctive_features, likely_use, short_description, confidence, needs_review,
+distinctive_features, likely_use, short_description, storage_size, confidence, needs_review,
 uncertainty_notes, extraction_summary, received_view_count, view_observations.
 
 Data requirements:
@@ -118,6 +128,7 @@ Data requirements:
   location, severity, certainty, and evidence.
 - count_confidence, condition_confidence, and confidence:
   "high", "medium", or "low".
+- storage_size: exactly "pocket" or "medium".
 - brand and model_or_variant: string or null.
 - document_kind: "none", "school ID", "driver's license", "government ID",
   "passport", "bank card", "identification card", or "sensitive document".

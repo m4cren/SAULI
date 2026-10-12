@@ -1,8 +1,10 @@
 "use client";
 
 import { createContext, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { compartments } from "../_data/mockKioskData";
-import { analyzeFoundItem, confirmAndStoreFoundItem, reconcileFoundItemReview, type FoundItemAnalysis } from "@/libs/api/sauli";
+import { analyzeFoundItem, confirmAndStoreFoundItem, getSlotAvailability, reconcileFoundItemReview, SauliApiError, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type SlotAvailability } from "@/libs/api/sauli";
+import { BrowserQRCodeReader } from "@zxing/browser";
+import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots";
+import type { Compartment } from "../_types/kiosk";
 import type { ImageKind } from "../_types/kiosk";
 import { initialKioskState, kioskReducer } from "./kioskReducer";
 
@@ -10,16 +12,31 @@ const allowedImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 
 function useKioskFlow() {
   const [state, dispatch] = useReducer(kioskReducer, initialKioskState);
-  const [allOccupied, setAllOccupied] = useState(false);
+  const [availability, setAvailability] = useState<Partial<Record<StorageSize, SlotAvailability>>>({});
+  const [availabilityError, setAvailabilityError] = useState(false);
   const [analysis, setAnalysis] = useState<FoundItemAnalysis | null>(null);
   const [busy, setBusy] = useState(false);
   const files = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
   const confirmationKey = useRef<string | null>(null);
   const confirmInFlight = useRef(false);
+  const placementInFlight = useRef(false);
+  const retrievalInFlight = useRef(false);
+  const decodeInFlight = useRef(false);
+  const qrFile = useRef<File | null>(null);
   const objectUrls = useRef<Record<ImageKind, string | null>>({ front: null, back: null, qr: null });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const slots = allOccupied ? compartments.map((slot) => ({ ...slot, occupied: true })) : compartments;
-  const availableCount = slots.filter((slot) => !slot.occupied).length;
+  const slots: readonly Compartment[] = [...pocketCodes.map((id) => ({ id: id as Compartment["id"], size: "Pocket-size" as const, occupied: false })),
+    ...mediumCodes.map((id) => ({ id: id as Compartment["id"], size: "Medium-size" as const, occupied: false }))];
+  const availableCount = state.storageSize ? availability[state.storageSize]?.available ?? null : null;
+
+  useEffect(() => {
+    if (state.screen.mode !== "found" || state.screen.step !== "summary") return;
+    let active = true;
+    Promise.all([getSlotAvailability("pocket"), getSlotAvailability("medium")])
+      .then(([pocket, medium]) => { if (active) { setAvailability({ pocket, medium }); setAvailabilityError(false); } })
+      .catch(() => { if (active) { setAvailability({}); setAvailabilityError(true); } });
+    return () => { active = false; };
+  }, [state.screen]);
 
   useEffect(() => {
     const urls = objectUrls;
@@ -46,18 +63,25 @@ function useKioskFlow() {
       dispatch({ type: "SET_ERROR", message: "Choose a PNG, JPG, JPEG, or WebP image." });
       return;
     }
+    if (kind === "qr" && file.size > 5_000_000) {
+      dispatch({ type: "SET_ERROR", message: "Choose a QR image smaller than 5 MB." });
+      return;
+    }
     clearImage(kind);
     const url = URL.createObjectURL(file);
     objectUrls.current[kind] = url;
     if (kind === "front" || kind === "back") { files.current[kind] = file; confirmationKey.current = null; }
+    if (kind === "qr") qrFile.current = file;
     dispatch({ type: "IMAGE_SELECTED", kind, url });
   }
 
   function reset() {
     clearTimer();
     (Object.keys(objectUrls.current) as ImageKind[]).forEach(clearImage);
-    setAllOccupied(false);
+    setAvailability({});
+    setAvailabilityError(false);
     files.current = { front: null, back: null };
+    qrFile.current = null;
     confirmationKey.current = null;
     setAnalysis(null);
     dispatch({ type: "RESET" });
@@ -82,11 +106,11 @@ function useKioskFlow() {
     dispatch({ type: "IDENTIFY_STARTED" });
     setBusy(true);
     try {
-      const result = await analyzeFoundItem(files.current.front, files.current.back, state.foundLocation, state.extraNotes);
+      const result = await analyzeFoundItem(files.current.front, files.current.back, state.foundLocation);
       setAnalysis(result.analysis);
-      dispatch({ type: "IDENTIFIED", review: { name: result.analysis.object_name, summary: result.summary,
+      dispatch({ type: "IDENTIFIED", size: result.analysis.storage_size, review: { name: result.analysis.object_name, summary: result.summary,
         category: result.analysis.category, color: result.analysis.colors.join(", "),
-        material: result.analysis.material.join(", "), size: "Not assigned" } });
+        material: result.analysis.material.join(", "), size: result.analysis.storage_size === "pocket" ? "Pocket-size" : "Medium-size" } });
     } catch (error) {
       dispatch({ type: "IDENTIFY_FAILED", message: error instanceof Error ? error.message : "Analysis failed." });
     } finally { setBusy(false); }
@@ -94,17 +118,19 @@ function useKioskFlow() {
 
   async function confirmFound() {
     if (!analysis || !files.current.front || !files.current.back || busy || confirmInFlight.current) return;
+    if (!state.storageSize) { dispatch({ type: "SET_ERROR", message: "The item needs a storage-size recommendation before confirming. Analyze it again." }); return; }
     confirmInFlight.current = true;
     setBusy(true);
     confirmationKey.current ??= crypto.randomUUID();
     try {
-      await confirmAndStoreFoundItem(files.current.front, files.current.back, state.foundLocation, state.extraNotes, analysis, confirmationKey.current);
+      const assigned = await confirmAndStoreFoundItem(files.current.front, files.current.back, state.foundLocation, analysis, state.storageSize, confirmationKey.current);
       clearImage("front"); clearImage("back");
       files.current = { front: null, back: null };
       setAnalysis(null);
-      dispatch({ type: "FOUND_CONFIRMED" });
+      dispatch({ type: "FOUND_CONFIRMED", assignment: assigned });
     } catch (error) {
-      dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "The item could not be saved." });
+      if (error instanceof SauliApiError && error.code === "NO_AVAILABLE_STORAGE_SLOT") dispatch({ type: "NO_SLOTS", size: error.requestedSize ?? state.storageSize });
+      else dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "The item could not be saved." });
     } finally { confirmInFlight.current = false; setBusy(false); }
   }
 
@@ -113,59 +139,104 @@ function useKioskFlow() {
     if (!state.correctionNote.trim()) { dispatch({ type: "SAVE_REVIEW" }); return; }
     setBusy(true);
     try {
-      const result = await reconcileFoundItemReview(analysis, state.foundLocation, state.extraNotes, state.correctionNote);
+      const result = await reconcileFoundItemReview(analysis, state.foundLocation, state.correctionNote);
       setAnalysis(result.analysis);
-      dispatch({ type: "REVIEW_RECONCILED", review: { name: result.analysis.object_name, summary: result.summary,
+      dispatch({ type: "REVIEW_RECONCILED", size: result.analysis.storage_size, review: { name: result.analysis.object_name, summary: result.summary,
         category: result.analysis.category, color: result.analysis.colors.join(", "),
-        material: result.analysis.material.join(", "), size: "Not assigned" } });
+        material: result.analysis.material.join(", "), size: result.analysis.storage_size === "pocket" ? "Pocket-size" : "Medium-size" } });
     } catch (error) {
       dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "The correction could not be applied." });
     } finally { setBusy(false); }
   }
 
-  function validateQr() {
-    if (!state.images.qr) return;
+  async function validatePayload(payload: string) {
+    if (retrievalInFlight.current) return;
+    retrievalInFlight.current = true;
+    setBusy(true);
     dispatch({ type: "QR_CHECK_STARTED" });
-    clearTimer();
-    timer.current = setTimeout(() => dispatch({ type: "QR_VALID" }), 850);
+    try {
+      const retrieval = await validateRetrievalQr(payload);
+      clearImage("qr");
+      qrFile.current = null;
+      dispatch({ type: "QR_VALID", retrieval });
+    } catch (cause) {
+      dispatch({ type: "QR_INVALID", message: cause instanceof Error ? cause.message : "The QR could not be verified.",
+        code: cause instanceof SauliApiError ? cause.code : undefined });
+    } finally { retrievalInFlight.current = false; setBusy(false); }
   }
 
-  function simulateQr(result: "valid" | "invalid") {
-    clearTimer();
-    if (state.screen.mode === "retrieve" && state.screen.step === "uploadQr") {
-      dispatch({ type: result === "valid" ? "QR_VALID" : "QR_INVALID" });
-    } else if (state.screen.mode === "retrieve" && state.screen.step === "verifyingQr") {
-      dispatch({ type: result === "valid" ? "QR_VALID" : "QR_INVALID" });
-    }
+  async function validateQr() {
+    if (!qrFile.current || retrievalInFlight.current || decodeInFlight.current) return;
+    decodeInFlight.current = true;
+    setBusy(true);
+    const reader = new BrowserQRCodeReader();
+    const url = URL.createObjectURL(qrFile.current);
+    try {
+      const decoded = await reader.decodeFromImageUrl(url);
+      await validatePayload(decoded.getText());
+    } catch {
+      dispatch({ type: "SET_ERROR", message: "No readable QR was found in this image. Try a clear PNG, JPEG, or WebP file." });
+    } finally { URL.revokeObjectURL(url); decodeInFlight.current = false; setBusy(false); }
   }
 
   function tryAnotherQr() {
     clearImage("qr");
+    qrFile.current = null;
     dispatch({ type: "TRY_ANOTHER_QR" });
   }
 
-  function simulateNoSlots() {
-    setAllOccupied(true);
-    dispatch({ type: "NO_SLOTS" });
+  async function simulateRetrieval(event: "completion" | "wrong-item" | "item-returned") {
+    const retrieval = state.validatedRetrieval;
+    if (!retrieval || busy || retrievalInFlight.current) return;
+    retrievalInFlight.current = true;
+    setBusy(true);
+    try {
+      await simulateRetrievalEvent(retrieval.id, retrieval.action_token, event);
+      dispatch({ type: event === "completion" ? "CORRECT_ITEM" : event === "wrong-item" ? "WRONG_ITEM" : "WRONG_ITEM_RETURNED" });
+      if (event === "completion" && typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel("sauli-storage-slots");
+        channel.postMessage("retrieval-completed"); channel.close();
+      }
+    } catch (cause) {
+      dispatch({ type: "SET_ERROR", message: cause instanceof Error ? cause.message : "The simulation could not be recorded." });
+    } finally { retrievalInFlight.current = false; setBusy(false); }
+  }
+
+  async function simulateCorrectPlacement() {
+    const assignment = state.assignment;
+    if (!assignment || busy || placementInFlight.current) return;
+    placementInFlight.current = true;
+    setBusy(true);
+    try {
+      const placed = await simulateItemPlacement(assignment.item_id, assignment.slot_code);
+      dispatch({ type: "PLACEMENT_SUCCEEDED", assignment: placed });
+      if (typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel("sauli-storage-slots");
+        channel.postMessage("placement-updated");
+        channel.close();
+      }
+    } catch (error) {
+      dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "Placement could not be recorded." });
+    } finally { placementInFlight.current = false; setBusy(false); }
   }
 
   return {
-    state, slots, availableCount, busy, analysis,
-    selectFile, reset, retakePhotos, identify, confirmFound, saveReview, validateQr, simulateQr, tryAnotherQr, simulateNoSlots,
+    state, slots, availableCount, availability, availabilityError, busy, analysis,
+    selectFile, reset, retakePhotos, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
     startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),
     acceptSide: (side: "front" | "back") => dispatch({ type: "SIDE_ACCEPTED", side }),
     setLocation: (value: string) => dispatch({ type: "LOCATION_CHANGED", value }),
-    setExtraNotes: (value: string) => dispatch({ type: "EXTRA_NOTES_CHANGED", value }),
     setCorrectionNote: (value: string) => dispatch({ type: "CORRECTION_NOTE_CHANGED", value }),
+    setStorageSize: (size: StorageSize) => dispatch({ type: "SIZE_SELECTED", size }),
     simulateWrongPlacement: () => dispatch({ type: "WRONG_PLACEMENT" }),
     simulatePlacementRemoved: () => dispatch({ type: "WRONG_PLACEMENT_REMOVED" }),
-    simulateCorrectPlacement: () => dispatch({ type: "CORRECT_PLACEMENT" }),
+    simulateCorrectPlacement,
     simulateDoorClosed: () => dispatch({ type: "DOOR_CLOSED" }),
     showItemLocation: () => dispatch({ type: "SHOW_ITEM_LOCATION" }),
-    simulateWrongItem: () => dispatch({ type: "WRONG_ITEM" }),
-    simulateItemReturned: () => dispatch({ type: "WRONG_ITEM_RETURNED" }),
-    simulateCorrectItem: () => dispatch({ type: "CORRECT_ITEM" }),
+    simulateWrongItem: () => void simulateRetrieval("wrong-item"),
+    simulateItemReturned: () => void simulateRetrieval("item-returned"),
+    simulateCorrectItem: () => void simulateRetrieval("completion"),
     requestCancel: () => dispatch({ type: "CANCEL_REQUESTED" }),
     stay: () => dispatch({ type: "CANCEL_STAY" }),
   };

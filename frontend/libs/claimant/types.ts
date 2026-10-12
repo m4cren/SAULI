@@ -1,4 +1,4 @@
-export type CompartmentId = "P-05";
+export type CompartmentId = `P-${string}` | `M-${string}`;
 
 export interface SearchDraft {
   description: string;
@@ -6,21 +6,14 @@ export interface SearchDraft {
 }
 
 export interface SearchFilters {
-  category: string;
-  color: string;
-  size: string;
-  brand: string;
   lastSeenLocation: string;
   lastSeenAt: string;
-}
-
-export interface SearchInput extends SearchDraft {
-  filters: SearchFilters;
 }
 
 export interface SearchResult {
   id: string;
   itemId: string;
+  matchCandidateId?: string;
   name: string;
   matchPercent: number;
   storageStatus: "stored";
@@ -35,29 +28,12 @@ export interface SearchResult {
   imageUrl?: string | null;
 }
 
-export interface MissingReportInput {
-  search: SearchInput;
-  phone: string;
-  smsEnabled: boolean;
-  inAppEnabled: boolean;
-}
-
 export interface MissingReport {
   id: string;
   summary: string;
-  phone: string;
-  smsEnabled: boolean;
-  inAppEnabled: boolean;
-  status: "active";
-}
-
-export interface RetrievalPass {
-  itemId: string;
-  itemName: string;
-  compartmentId: CompartmentId;
-  createdAt: string;
-  expiresAt: string;
-  prototype: true;
+  notificationEmail: string;
+  emailEnabled: boolean;
+  status: "active" | "matched" | "resolved" | "cancelled";
 }
 
 export interface RetrievalRecord {
@@ -68,38 +44,33 @@ export interface RetrievalRecord {
   recordedAt: string;
 }
 
-export interface MockIncident {
-  wrongCompartmentId: "P-06";
-  wrongItemName: "Keychain";
-  returnedAt: string | null;
-}
-
-export interface ClaimantService {
-  createMissingReport(input: MissingReportInput): Promise<MissingReport>;
-  getRetrievalHistory(): Promise<RetrievalRecord[]>;
+export interface ClaimantRetrievalSession {
+  id: string;
+  qrPayload: string | null;
+  issuedAt: string;
+  expiresAt: string;
+  status: "issued" | "validated" | "completed" | "expired" | "cancelled";
+  itemSummary: string;
+  validatedAt: string | null;
+  completedAt: string | null;
+  slotCode: string | null;
+  section: "pocket" | "medium" | null;
+  wrongItemOut: boolean;
+  retriever: string | null;
 }
 
 export type SearchStatus = "idle" | "searching" | "results" | "empty" | "error";
-export type RetrievalStatus =
-  | "idle"
-  | "waitingForQrScan"
-  | "qrExpired"
-  | "waitingForCorrectItem"
-  | "waitingForWrongItemReturn"
-  | "retrieved";
-
 export interface ClaimantState {
   searchDraft: SearchDraft;
   filters: SearchFilters;
+  searchRequestId: string | null;
+  searchSummary: string | null;
   searchStatus: SearchStatus;
   searchError: string | null;
   searchResults: SearchResult[];
   rejectedCandidateIds: string[];
   missingReport: MissingReport | null;
   selectedItem: SearchResult | null;
-  retrievalPass: RetrievalPass | null;
-  retrievalStatus: RetrievalStatus;
-  wrongCompartmentId: "P-06" | null;
-  incident: MockIncident | null;
+  retrievalSession: ClaimantRetrievalSession | null;
   retrievalHistory: RetrievalRecord[];
 }

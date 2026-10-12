@@ -1,35 +1,4 @@
-import type { Compartment, CompartmentId, RetrievalRecord, UnrecognizedCapture } from "../_types/admin";
-
-const pocketIds = Array.from({ length: 10 }, (_, i) => `P-${String(i + 1).padStart(2, "0")}` as CompartmentId);
-const mediumIds = Array.from({ length: 5 }, (_, i) => `M-${String(i + 1).padStart(2, "0")}` as CompartmentId);
-export const compartmentIds = [...pocketIds, ...mediumIds];
-
-const occupied: Partial<Record<CompartmentId, [string, number, string]>> = {
-  "P-01": ["Keychain", 42, "Yesterday · 3:28 PM"],
-  "P-02": ["Wristwatch", 62, "Yesterday · 11:05 AM"],
-  "P-03": ["Mobile phone", 86, "Today · 9:06 AM"],
-  "P-06": ["Wallet", 74, "Today · 8:43 AM"],
-  "P-08": ["Coin purse", 55, "Yesterday · 4:18 PM"],
-  "P-09": ["Eyeglasses", 39, "Yesterday · 1:13 PM"],
-  "M-01": ["Water bottle", 310, "Today · 7:50 AM"],
-  "M-03": ["Pencil case", 120, "Yesterday · 10:40 AM"],
-  "M-04": ["Umbrella", 415, "Yesterday · 9:15 AM"],
-};
-
-export const compartments: Compartment[] = compartmentIds.map((id) => {
-  const item = occupied[id];
-  return {
-    id, size: id.startsWith("P") ? "Pocket-size" : "Medium-size",
-    status: item ? "occupied" : "available",
-    sensor: id === "P-06" ? "needs_attention" : id === "M-03" ? "disconnected" : "active",
-    weightGrams: item?.[1] ?? 0, storedItem: item?.[0] ?? null,
-    lastActivity: item?.[2] ?? "No recent activity",
-  };
-});
-
-export function compartmentTotals(items: readonly Compartment[]) {
-  return { available: items.filter((item) => item.status === "available").length, occupied: items.filter((item) => item.status === "occupied").length };
-}
+import type { CompartmentId, RetrievalRecord } from "../_types/admin";
 
 export const retrievalRecords: RetrievalRecord[] = [
   ["R-1087", "2026-09-09T12:44:00+08:00", "Angela Lim", "Brown coin purse", "P-04"],
@@ -40,13 +9,7 @@ export const retrievalRecords: RetrievalRecord[] = [
   ["R-1082", "2026-09-07T10:23:00+08:00", "Carlo Mendoza", "Pencil case", "M-04"],
   ["R-1081", "2026-09-06T13:40:00+08:00", "Bea Torres", "Wristwatch", "P-02"],
   ["R-1080", "2026-09-05T09:16:00+08:00", "Miguel Ramos", "Eyeglass case", "M-01"],
-].map(([id, timestamp, retriever, item, compartment]) => ({ id, timestamp, retriever, item, compartment: compartment as CompartmentId, status: "Retrieved", verification: "QR code verified" }));
-
-export const unrecognizedCaptures: UnrecognizedCapture[] = [
-  { id: "UC-001", title: "Unrecognized item", timestamp: "2026-10-04T10:42:00+08:00", source: "Raspberry Pi Camera", reason: "Item could not be identified confidently.", confidence: 34 },
-  { id: "UC-002", title: "Unsupported category", timestamp: "2026-10-04T11:18:00+08:00", source: "Raspberry Pi Camera", reason: "Category is not represented in this prototype." },
-  { id: "UC-003", title: "Low-confidence identification", timestamp: "2026-10-04T13:07:00+08:00", source: "Raspberry Pi Camera", reason: "The image did not provide enough detail.", confidence: 41 },
-];
+].map(([id, timestamp, retriever, item, compartment]) => ({ id, timestamp, retriever, item, compartment: compartment as CompartmentId, status: "Retrieved", verification: "QR code verified", completionSource: "Web simulation" }));
 
 export const prototypeFootageArchive = { camera: "front", date: "2026-09-08", start: "15:30" } as const;
 export function hasPrototypeFootage(camera: string, date: string, start: string) {
@@ -88,7 +51,7 @@ export function filterRetrievals(records: readonly RetrievalRecord[], search: st
 
 export function toCsv(records: readonly RetrievalRecord[]) {
   const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
-  return ["Retrieval ID,Date and Time,Retriever,Item,Compartment,Status", ...records.map((record) =>
-    [record.id, formatManilaDate(record.timestamp), record.retriever, record.item, record.compartment, record.status].map(quote).join(",")
+  return ["Retrieval ID,Date and Time,Retriever,Item,Compartment,Status,Completion Source", ...records.map((record) =>
+    [record.id, formatManilaDate(record.timestamp), record.retriever, record.item, record.compartment, record.status, record.completionSource].map(quote).join(",")
   )].join("\r\n");
 }
