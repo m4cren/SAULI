@@ -22,8 +22,8 @@ export default function KioskShell() {
   if (screen.mode === "home") content = <HomeActions />;
   else if (screen.mode === "found") {
     switch (screen.step) {
-      case "captureFront": content = <ItemCaptureStep side={1} />; break;
-      case "captureBack": content = <ItemCaptureStep side={2} />; break;
+      case "captureFront": content = <ItemCaptureStep key="front" side={1} />; break;
+      case "captureBack": content = <ItemCaptureStep key="back" side={2} />; break;
       case "foundLocation": content = <FoundLocationForm />; break;
       case "identifying": content = <ProcessingScreen kind="identify" />; break;
       case "summary": content = <IdentificationSummary />; break;
@@ -45,5 +45,6 @@ export default function KioskShell() {
   }
   const compactReview = screen.mode === "found" && screen.step === "review";
   const compactSummary = screen.mode === "found" && screen.step === "summary";
-  return <div className="mx-auto min-h-dvh w-full max-w-[1280px] bg-white font-sans text-[#092a2f] shadow-[0_0_25px_rgba(0,0,0,0.06)]"><div inert={Boolean(modal)} aria-hidden={Boolean(modal)} className="min-h-dvh">{screen.mode === "home" ? content : <><KioskHeader /><main className={`mx-auto w-full max-w-[1180px] px-5 sm:px-10 ${compactReview ? "pb-0 pt-6" : compactSummary ? "pb-0 pt-9" : "pb-8 pt-9"}`}>{content}</main></>}</div>{modal && <StatusModal type={modal} />}</div>;
+  const compactCapture = screen.mode === "found" && (screen.step === "captureFront" || screen.step === "captureBack" || screen.step === "foundLocation");
+  return <div className="mx-auto min-h-dvh w-full max-w-[1280px] bg-white font-sans text-[#092a2f] shadow-[0_0_25px_rgba(0,0,0,0.06)]"><div inert={Boolean(modal)} aria-hidden={Boolean(modal)} className="min-h-dvh">{screen.mode === "home" ? content : <><KioskHeader /><main className={`mx-auto w-full max-w-[1180px] px-5 sm:px-10 ${compactReview ? "pb-0 pt-6" : compactCapture ? "pb-5 pt-5" : compactSummary ? "pb-0 pt-9" : "pb-8 pt-9"}`}>{content}</main></>}</div>{modal && <StatusModal type={modal} />}</div>;
 }

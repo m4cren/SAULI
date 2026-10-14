@@ -5,7 +5,7 @@
 -- This file is not a migration and must not be included in db push.
 -- It preserves auth.users, auth.identities, the bucket, schema, and all 15
 -- seeded storage_slots rows, including their stable IDs and codes.
--- Retrieval sessions, events, and completed logs are also cleared.
+-- Retrieval sessions, events, completed logs, and resolved reports are also cleared.
 
 begin;
 set local lock_timeout = '10s';

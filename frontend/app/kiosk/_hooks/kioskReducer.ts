@@ -36,6 +36,7 @@ export type KioskAction =
   | { type: "CORRECTION_NOTE_CHANGED"; value: string }
   | { type: "SAVE_REVIEW" }
   | { type: "RETAKE_PHOTOS" }
+  | { type: "RETAKE_SIDE"; side: "front" | "back" }
   | { type: "FOUND_CONFIRMED"; assignment?: ConfirmedItem }
   | { type: "PLACEMENT_SUCCEEDED"; assignment: ConfirmedItem }
   | { type: "WRONG_PLACEMENT" }
@@ -65,7 +66,7 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     case "SET_ERROR": return { ...state, error: action.message };
     case "SIDE_ACCEPTED":
       if (screen.mode !== "found" || modal) return state;
-      if (action.side === "front" && screen.step === "captureFront" && state.images.front) return { ...state, screen: { mode: "found", step: "captureBack" } };
+      if (action.side === "front" && screen.step === "captureFront" && state.images.front) return { ...state, screen: { mode: "found", step: state.images.back ? "foundLocation" : "captureBack" } };
       if (action.side === "back" && screen.step === "captureBack" && state.images.back) return { ...state, screen: { mode: "found", step: "foundLocation" } };
       return state;
     case "LOCATION_CHANGED": return { ...state, foundLocation: action.value, error: null };
@@ -78,6 +79,9 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     case "SAVE_REVIEW": return screen.mode === "found" && screen.step === "review"
       ? { ...state, screen: { mode: "found", step: "summary" }, error: null } : state;
     case "RETAKE_PHOTOS": return screen.mode === "found" && !modal ? { ...state, screen: { mode: "found", step: "captureFront" }, images: { ...state.images, front: null, back: null }, storageSize: null, error: null } : state;
+    case "RETAKE_SIDE": return screen.mode === "found" && screen.step === "foundLocation" && !modal
+      ? { ...state, screen: { mode: "found", step: action.side === "front" ? "captureFront" : "captureBack" },
+        images: { ...state.images, [action.side]: null }, storageSize: null, error: null } : state;
     case "FOUND_CONFIRMED": return screen.mode === "found" && screen.step === "summary"
       ? { ...state, screen: { mode: "found", step: "placement" }, assignment: action.assignment ?? null, images: { ...state.images, front: null, back: null }, error: null } : state;
     case "PLACEMENT_SUCCEEDED": return screen.mode === "found" && screen.step === "placement"

@@ -74,7 +74,8 @@ export default function MissingReportReview({ reportId }: { reportId: string }) 
     {loading && <p role="status" className="mt-5">Loading your report…</p>}
     {error && <p role="alert" className="mt-5 text-sm text-red-700">{error}</p>}
     {report && <>
-      <p className="sauli-subtitle mt-1">{report.candidate ? "Possible match found. Review it below." :
+      <p className="sauli-subtitle mt-1">{report.status === "resolved" ? "Item retrieved. Your missing-item report is closed." :
+        report.candidate ? "Possible match found. Review it below." :
         report.candidate_decision === "accepted" ? "Match confirmed. Open your retrieval pass to continue." :
         report.status === "active" ? "SAULI is watching for a possible match." : `Report ${report.status}.`}</p>
       <section className="sauli-card mt-5 p-4"><h2 className="text-xs font-bold text-[#0B474F]">YOUR MISSING ITEM</h2><p className="mt-2 text-sm">{report.summary}</p></section>
@@ -94,9 +95,9 @@ export default function MissingReportReview({ reportId }: { reportId: string }) 
         <div className="mt-5 space-y-2"><Button type="button" disabled={busy} onClick={() => void decide("confirm")} className="w-full">This is my item</Button>
           <Button type="button" variant="outline" disabled={busy} onClick={() => void decide("reject")} className="w-full">Not mine</Button></div>
       </section> : <section className="sauli-card mt-5 p-5 text-sm">
-        {report.candidate_decision === "accepted" ? "This match was confirmed. Open your retrieval pass to continue." :
+        {report.status === "resolved" ? "Your item was retrieved successfully. This report is no longer being monitored." :
+          report.candidate_decision === "accepted" ? "This match was confirmed. Open your retrieval pass to continue." :
           report.status === "cancelled" ? "This report was cancelled and is no longer being monitored." :
-          report.status === "resolved" ? "This report was resolved and is no longer being monitored." :
           report.candidate_decision === "rejected" ? "You marked the previous item Not mine. SAULI will keep watching for another match." :
           "No unreviewed match is available yet. SAULI will keep monitoring newly placed items."}
       </section>}

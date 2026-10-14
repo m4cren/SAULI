@@ -26,6 +26,10 @@ LIVE_STATUS_MIGRATION = (
     Path(__file__).resolve().parents[3]
     / "supabase/migrations/202610110003_sauli_retrieval_live_status.sql"
 )
+RESOLVED_REPORT_MIGRATION = (
+    Path(__file__).resolve().parents[3]
+    / "supabase/migrations/202610140001_sauli_resolve_retrieved_reports.sql"
+)
 
 
 class RetrievalRepo:
@@ -529,3 +533,17 @@ def test_migration_enforces_one_active_qr_and_atomic_slot_release():
     assert "'wrong_item_out'" in live_sql
     assert "'slot_code',v_slot_code" in live_sql
     assert "from public,anon,authenticated" in live_sql
+
+
+def test_completed_retrieval_resolves_only_its_accepted_report_and_backfills_prior_sessions():
+    sql = RESOLVED_REPORT_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "after update of status on public.retrieval_sessions" in sql
+    assert "new.status = 'completed' and old.status is distinct from new.status" in sql
+    assert "candidate.id = new.match_candidate_id" in sql
+    assert "candidate.found_item_id = new.found_item_id" in sql
+    assert "report.claimant_user_id = new.claimant_user_id" in sql
+    assert "candidate.decision = 'accepted'" in sql
+    assert "report.status = 'matched'" in sql
+    assert "set status = 'resolved'" in sql
+    assert "session.status = 'completed'" in sql
+    assert "item.status = 'retrieved'" in sql

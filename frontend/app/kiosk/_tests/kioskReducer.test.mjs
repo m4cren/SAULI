@@ -81,3 +81,29 @@ test("invalid QR can be retried and reset clears images", () => {
   assert.deepEqual(state.images, { front: null, back: null, qr: null });
   assert.deepEqual(state.screen, { mode: "home" });
 });
+
+test("final review retakes one side while preserving the other and the found location", () => {
+  let state = move(initialKioskState, { type: "START_FOUND" });
+  state = move(state, { type: "IMAGE_SELECTED", kind: "front", url: "blob:front" });
+  state = move(state, { type: "SIDE_ACCEPTED", side: "front" });
+  state = move(state, { type: "IMAGE_SELECTED", kind: "back", url: "blob:back" });
+  state = move(state, { type: "SIDE_ACCEPTED", side: "back" });
+  state = move(state, { type: "LOCATION_CHANGED", value: "Library" });
+
+  state = move(state, { type: "RETAKE_SIDE", side: "front" });
+  assert.equal(state.screen.step, "captureFront");
+  assert.equal(state.images.front, null);
+  assert.equal(state.images.back, "blob:back");
+  state = move(state, { type: "IMAGE_SELECTED", kind: "front", url: "blob:new-front" });
+  state = move(state, { type: "SIDE_ACCEPTED", side: "front" });
+  assert.equal(state.screen.step, "foundLocation");
+  assert.equal(state.foundLocation, "Library");
+
+  state = move(state, { type: "RETAKE_SIDE", side: "back" });
+  assert.equal(state.screen.step, "captureBack");
+  assert.equal(state.images.front, "blob:new-front");
+  assert.equal(state.images.back, null);
+  state = move(state, { type: "IMAGE_SELECTED", kind: "back", url: "blob:new-back" });
+  state = move(state, { type: "SIDE_ACCEPTED", side: "back" });
+  assert.equal(state.screen.step, "foundLocation");
+});

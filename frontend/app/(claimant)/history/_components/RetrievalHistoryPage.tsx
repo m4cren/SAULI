@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import Icon from "@/app/components/Icon";
 import { getClaimantRetrievalHistory } from "@/libs/api/sauli";
 import { formatDateTime } from "@/libs/claimant/format";
@@ -54,6 +55,7 @@ export default function RetrievalHistoryPage() {
       <p className="sauli-eyebrow mt-1">Audit Trail</p>
       <h1 className="sauli-title mt-3">Retrieval history</h1>
       <p className="sauli-subtitle mt-1">A transparent log of items released from the SAULI container.</p>
+      <Link href="/missing/reports" className="mt-2 inline-flex min-h-11 items-center text-sm font-semibold text-[#0B474F] underline">View missing-item reports</Link>
       <div role="group" aria-label="Filter retrieval history" className="mt-7 flex gap-1.5">
         {([["all", "All records"], ["month", "This month"], ["search", "Search"]] as const).map(([value, label]) => (
           <button key={value} type="button" aria-pressed={filter === value} onClick={() => setFilter(value)} className={`min-h-11 flex-1 rounded-full border px-2 text-[11px] tracking-[0.04em] focus-visible:outline-2 focus-visible:outline-[var(--sauli-brand)] ${filter === value ? "sauli-gradient border-transparent font-semibold text-white" : "border-[var(--sauli-border)] bg-white text-[#444]"}`}>{label}</button>

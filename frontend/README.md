@@ -13,6 +13,8 @@ npm.cmd run dev
 
 Open `http://localhost:3000/auth/login`.
 
+For PC-webcam kiosk testing, open `/kiosk` on `http://localhost:3000` or an HTTPS deployment. Browsers normally block camera access on other insecure origins. Choose **Scan a found item**, allow camera access, capture front and back images, then review and analyze them. Image upload remains available if a camera is unavailable. The future Raspberry Pi camera can use this browser flow when Chromium exposes it as a video device.
+
 ## Project structure
 
 - `app/**/page.tsx` and `app/**/layout.tsx`: route entry points and layouts.

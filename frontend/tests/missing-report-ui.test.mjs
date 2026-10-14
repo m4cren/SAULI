@@ -79,8 +79,10 @@ test("home report shortcut appears only after the account has a submitted report
     return renderToStaticMarkup(React.createElement(Shortcut));
   }
   assert.equal(renderShortcut([]), "");
-  assert.match(renderShortcut([{ id: "report-one" }]), /href="\/missing\/reports\/report-one"/);
-  assert.match(renderShortcut([{ id: "report-one" }, { id: "report-two" }]), /href="\/missing\/reports"/);
+  assert.match(renderShortcut([{ id: "report-one", status: "active" }]), /href="\/missing\/reports\/report-one"/);
+  assert.match(renderShortcut([{ id: "report-one", status: "active" }, { id: "report-two", status: "matched" }]), /href="\/missing\/reports"/);
+  assert.equal(renderShortcut([{ id: "report-one", status: "resolved" }]), "");
+  assert.match(renderShortcut([{ id: "report-one", status: "resolved" }, { id: "report-two", status: "matched" }]), /href="\/missing\/reports\/report-two"/);
 });
 
 test("report list links to each submitted report and shows its stored status", () => {
@@ -98,4 +100,32 @@ test("report list links to each submitted report and shows its stored status", (
   assert.match(html, /href="\/missing\/reports\/report-one"/);
   assert.match(html, /Lost blue bottle/);
   assert.match(html, /active/);
+});
+
+test("a retrieved report shows completion even when its match was accepted", () => {
+  function renderReview(status) {
+    const state = [
+      { id: "report-one", summary: "Lost blue bottle", status,
+        candidate: null, candidate_decision: "accepted" },
+      false, false, null, false, 0,
+    ];
+    const Review = loadComponent("app/(claimant)/missing/reports/[reportId]/_components/MissingReportReview.tsx", {
+      react: { ...React, useState: () => [state.shift(), () => {}], useEffect: () => {} },
+      "next/image": () => React.createElement("span"),
+      "next/navigation": { useRouter: () => ({ push() {} }) },
+      "@/app/components/BackButton": link,
+      "@/app/components/Button": button,
+      "@/app/components/ItemImagePlaceholder": () => React.createElement("span"),
+      "@/libs/api/sauli": { getMissingReport: async () => {} },
+      "@/libs/claimant/format": { formatDateTime: () => "Oct 12, 2026" },
+      "@/hooks/useClaimant": { useClaimant: () => ({ confirmCandidate() {}, rejectCandidate() {} }) },
+    });
+    return renderToStaticMarkup(React.createElement(Review, { reportId: "report-one" }));
+  }
+  const resolved = renderReview("resolved");
+  assert.match(resolved, /Item retrieved\. Your missing-item report is closed\./);
+  assert.match(resolved, /Your item was retrieved successfully/);
+  assert.doesNotMatch(resolved, /Open your retrieval pass/);
+
+  assert.match(renderReview("matched"), /Open your retrieval pass/);
 });

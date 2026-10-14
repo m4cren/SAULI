@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test tests/redirect.test.mjs tests/claimant-flow.test.mjs tests/notification-email.test.mjs tests/missing-report-ui.test.mjs tests/storage-flow.test.mjs tests/retrieval-qr.test.mjs tests/retrieval-scanner.test.mjs app/admin/_tests/admin-data.test.mjs app/kiosk/_tests/kioskReducer.test.mjs"
+    "test": "node --test tests/redirect.test.mjs tests/claimant-flow.test.mjs tests/notification-email.test.mjs tests/missing-report-ui.test.mjs tests/storage-flow.test.mjs tests/retrieval-qr.test.mjs tests/retrieval-scanner.test.mjs app/admin/_tests/admin-data.test.mjs app/kiosk/_tests/kioskReducer.test.mjs app/kiosk/_tests/cameraCapture.test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",

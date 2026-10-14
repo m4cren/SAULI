@@ -10,11 +10,12 @@ export default function MissingReportsShortcut() {
   if (error) return <div className="mt-5 text-sm text-[#555]" role="status">
     Could not check your missing-item reports. <button type="button" onClick={refresh} className="min-h-11 font-semibold text-[#0B474F] underline">Try again</button>
   </div>;
-  if (reports.length === 0) return null;
+  const openReports = reports.filter((report) => report.status === "active" || report.status === "matched");
+  if (openReports.length === 0) return null;
 
-  const href = reports.length === 1 ? `/missing/reports/${reports[0].id}` : "/missing/reports";
+  const href = openReports.length === 1 ? `/missing/reports/${openReports[0].id}` : "/missing/reports";
   return <Link href={href} className="sauli-card mt-5 flex min-h-16 items-center justify-between gap-3 p-4 text-[#0B474F] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#0B474F]">
-    <span><strong className="block text-base">My missing item {reports.length === 1 ? "report" : "reports"}</strong><span className="block text-sm">View current status</span></span>
+    <span><strong className="block text-base">My missing item {openReports.length === 1 ? "report" : "reports"}</strong><span className="block text-sm">View current status</span></span>
     <span aria-hidden="true" className="text-xl">›</span>
   </Link>;
 }

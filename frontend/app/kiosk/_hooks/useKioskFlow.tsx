@@ -23,6 +23,7 @@ function useKioskFlow() {
   const retrievalInFlight = useRef(false);
   const decodeInFlight = useRef(false);
   const qrFile = useRef<File | null>(null);
+  const captureSource = useRef<"camera" | "upload">("camera");
   const objectUrls = useRef<Record<ImageKind, string | null>>({ front: null, back: null, qr: null });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slots: readonly Compartment[] = [...pocketCodes.map((id) => ({ id: id as Compartment["id"], size: "Pocket-size" as const, occupied: false })),
@@ -63,8 +64,9 @@ function useKioskFlow() {
       dispatch({ type: "SET_ERROR", message: "Choose a PNG, JPG, JPEG, or WebP image." });
       return;
     }
-    if (kind === "qr" && file.size > 5_000_000) {
-      dispatch({ type: "SET_ERROR", message: "Choose a QR image smaller than 5 MB." });
+    const limit = kind === "qr" ? 5_000_000 : 10_485_760;
+    if (file.size > limit) {
+      dispatch({ type: "SET_ERROR", message: kind === "qr" ? "Choose a QR image smaller than 5 MB." : "Choose an item image no larger than 10 MiB." });
       return;
     }
     clearImage(kind);
@@ -82,6 +84,7 @@ function useKioskFlow() {
     setAvailabilityError(false);
     files.current = { front: null, back: null };
     qrFile.current = null;
+    captureSource.current = "camera";
     confirmationKey.current = null;
     setAnalysis(null);
     dispatch({ type: "RESET" });
@@ -97,12 +100,24 @@ function useKioskFlow() {
     dispatch({ type: "RETAKE_PHOTOS" });
   }
 
+  function retakeSide(side: "front" | "back") {
+    clearImage(side);
+    files.current[side] = null;
+    confirmationKey.current = null;
+    setAnalysis(null);
+    dispatch({ type: "RETAKE_SIDE", side });
+  }
+
   async function identify() {
     if (!state.foundLocation.trim()) {
       dispatch({ type: "SET_ERROR", message: "Enter where the item was found." });
       return;
     }
-    if (!files.current.front || !files.current.back || busy) return;
+    if (!files.current.front || !files.current.back) {
+      dispatch({ type: "SET_ERROR", message: "Capture or upload both the front and back images before analysis." });
+      return;
+    }
+    if (busy) return;
     dispatch({ type: "IDENTIFY_STARTED" });
     setBusy(true);
     try {
@@ -222,7 +237,8 @@ function useKioskFlow() {
 
   return {
     state, slots, availableCount, availability, availabilityError, busy, analysis,
-    selectFile, reset, retakePhotos, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
+    selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
+    captureSource, chooseCaptureSource: (source: "camera" | "upload") => { captureSource.current = source; },
     startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),
     acceptSide: (side: "front" | "back") => dispatch({ type: "SIDE_ACCEPTED", side }),
