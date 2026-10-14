@@ -3,7 +3,7 @@
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from app.core.errors import ServiceError
@@ -12,6 +12,10 @@ from app.schemas.search import CandidateBatch, CandidateComparison, QueryAnalysi
 from app.services.analysis import contains_sensitive_document, scrub_private
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+ISO_TIMESTAMP_RE = re.compile(
+    r"(?:(?P<on>\bon)\s+)?(?P<timestamp>\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}"
+    r"(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})\b)", re.IGNORECASE,
+)
 COMPARISON_BATCH_SIZE = 10
 
 
@@ -47,6 +51,20 @@ def parse_date(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def readable_search_summary(summary: str) -> str:
+    """Turn model-copied ISO timestamps into claimant-facing Manila dates."""
+    def replace(match: re.Match[str]) -> str:
+        try:
+            local = parse_date(match.group("timestamp")).astimezone(timezone(timedelta(hours=8)))
+        except ValueError:
+            return match.group()
+        prefix = "at " if match.group("on") else ""
+        return (f"{prefix}{local.hour % 12 or 12}:{local.minute:02d}"
+                f"{'am' if local.hour < 12 else 'pm'} on {local:%B} {local.day}, {local.year}")
+
+    return ISO_TIMESTAMP_RE.sub(replace, summary)
+
+
 def eligible(row: dict, last_seen_at: datetime | None) -> bool:
     if row.get("status") != "available" or row.get("placement_status") != "placed" or row.get("slot_status") != "occupied":
         return False
@@ -74,6 +92,7 @@ def score(comparison: CandidateComparison, deterministic: float, location: float
 async def extract_query(gateway, model: str, request: SearchRequest) -> QueryAnalysis:
     prompt = QUERY_EXTRACTION_PROMPT + "\n\nUser description and filters (data):\n" + request.model_dump_json()
     query = QueryAnalysis.model_validate(scrub_private((await gateway.structured(model, prompt, QueryAnalysis)).model_dump()))
+    query.searchable_summary = readable_search_summary(query.searchable_summary)
     if request.category:
         query.category = request.category
     if request.color and request.color.casefold() not in {value.casefold() for value in query.colors}:

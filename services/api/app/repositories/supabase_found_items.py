@@ -1,9 +1,11 @@
 """Server-only Supabase data and private Storage access."""
 
 import logging
+import time
 from datetime import UTC, datetime
 from uuid import UUID
 
+import httpx
 from starlette.concurrency import run_in_threadpool
 from supabase import Client, create_client
 
@@ -110,18 +112,27 @@ class SupabaseFoundItemRepository:
         client = self.require()
         try:
             def fetch():
-                result = client.table("storage_slots").select("*").execute()
-                rows = result.data or []
-                rows.sort(key=lambda row: (0 if row["size_class"] == "pocket" else 1, row["ordinal"]))
-                if include_items:
-                    ids = [row["current_found_item_id"] for row in rows if row.get("current_found_item_id")]
-                    summaries = {}
-                    if ids:
-                        items = client.table("found_items").select("id,object_name").in_("id", ids).execute().data or []
-                        summaries = {item["id"]: item["object_name"] for item in items}
-                    for row in rows:
-                        row["item_summary"] = summaries.get(row.get("current_found_item_id"))
-                return rows
+                # PostgREST retries some HTTP status codes, but a dropped
+                # connection raises before it receives any response. These
+                # two queries are reads, so a brief transport retry is safe.
+                for attempt in range(3):
+                    try:
+                        result = client.table("storage_slots").select("*").execute()
+                        rows = result.data or []
+                        rows.sort(key=lambda row: (0 if row["size_class"] == "pocket" else 1, row["ordinal"]))
+                        if include_items:
+                            ids = [row["current_found_item_id"] for row in rows if row.get("current_found_item_id")]
+                            summaries = {}
+                            if ids:
+                                items = client.table("found_items").select("id,object_name").in_("id", ids).execute().data or []
+                                summaries = {item["id"]: item["object_name"] for item in items}
+                            for row in rows:
+                                row["item_summary"] = summaries.get(row.get("current_found_item_id"))
+                        return rows
+                    except httpx.TransportError:
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.2 * (attempt + 1))
             return await run_in_threadpool(fetch)
         except Exception as exc:
             log.exception("Storage slot listing failed")

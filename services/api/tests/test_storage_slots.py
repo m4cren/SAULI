@@ -1,15 +1,20 @@
 """Storage contract tests; live PostgreSQL concurrency needs a local Supabase instance."""
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.dependencies import get_current_user
 from app.config import Settings
 from app.core.errors import ServiceError
 from app.main import create_app
+from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.auth import UserResponse
 from app.services.matching import eligible
 from app.services.storage_slots import availability
@@ -37,6 +42,44 @@ def test_availability_is_size_specific_and_counts_reserved_separately():
     medium = availability(rows, "medium")
     assert (pocket.available, pocket.reserved, pocket.occupied, pocket.can_assign) == (0, 1, 1, False)
     assert (medium.available, medium.can_assign) == (1, True)
+
+
+def test_slot_listing_retries_transient_network_reads_and_keeps_503_on_outage(monkeypatch):
+    monkeypatch.setattr("app.repositories.supabase_found_items.time.sleep", lambda _seconds: None)
+    slots = [
+        {"code": "M-01", "size_class": "medium", "ordinal": 1, "current_found_item_id": None},
+        {"code": "P-01", "size_class": "pocket", "ordinal": 1, "current_found_item_id": None},
+    ]
+
+    class Client:
+        calls = 0
+        fail_until = 2
+
+        def table(self, name):
+            assert name == "storage_slots"
+            return self
+
+        def select(self, _columns):
+            return self
+
+        def execute(self):
+            self.calls += 1
+            if self.calls <= self.fail_until:
+                raise httpx.ReadError("dropped connection")
+            return SimpleNamespace(data=[row.copy() for row in slots])
+
+    repo = SupabaseFoundItemRepository(Settings())
+    repo.client = Client()
+    rows = asyncio.run(repo.list_slots())
+    assert [row["code"] for row in rows] == ["P-01", "M-01"]
+    assert repo.client.calls == 3
+
+    repo.client = Client()
+    repo.client.fail_until = 3
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(repo.list_slots())
+    assert error.value.code == "SUPABASE_UNAVAILABLE" and error.value.status_code == 503
+    assert repo.client.calls == 3
 
 
 def test_only_placed_occupied_items_are_searchable():

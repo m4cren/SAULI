@@ -10,7 +10,10 @@ from app.schemas.found_items import AnalysisResponse, FoundItemAnalysis, Reconci
 from app.services.images import ImageData
 
 DOCUMENT_RE = re.compile(r"\b(?:school\s+id|student\s+id|government\s+id|driver'?s\s+licen[cs]e|passport|bank\s+card|identification\s+card|sensitive\s+document)\b", re.IGNORECASE)
-PRIVATE_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b|\b(?:\d[ -]?){6,}\b", re.IGNORECASE)
+# Dates such as 2026-10-14T06:34:00Z are not contact numbers. Without the
+# date exclusion, the phone-number branch consumes "2026-10-" and leaves a
+# broken "[redacted]14T..." timestamp in searchable summaries.
+PRIVATE_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b|\b(?!\d{4}-\d{2}-\d{2})(?:\d[ -]?){6,}\b", re.IGNORECASE)
 
 
 def scrub_private(value):

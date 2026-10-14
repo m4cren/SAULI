@@ -18,10 +18,10 @@ from app.main import create_app
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.found_items import FoundItemAnalysis
 from app.schemas.search import CandidateBatch, CandidateComparison, QueryAnalysis, SearchRequest
-from app.services.analysis import reconcile, safe_analysis
+from app.services.analysis import reconcile, safe_analysis, scrub_private
 from app.services.found_items import confirm_item, public_details
 from app.services.images import validate_image
-from app.services.matching import eligible, run_search, score
+from app.services.matching import eligible, readable_search_summary, run_search, score
 
 
 def png(width=2, height=2):
@@ -450,6 +450,33 @@ def test_search_date_uses_database_registration_time_including_timezone_boundary
     assert eligible(row, datetime.fromisoformat("2026-10-10T01:00:00+00:00"))
     assert not eligible(row, datetime.fromisoformat("2026-10-10T01:00:01+00:00"))
     assert not eligible({**row, "created_at": "invalid"}, None)
+
+
+def test_search_summary_preserves_dates_and_redacts_contact_details():
+    summary = "Blue tumbler at canteen on 2026-10-14T06:34:00Z; call 0917-123-4567"
+    assert scrub_private(summary) == "Blue tumbler at canteen on 2026-10-14T06:34:00Z; call [redacted]"
+    assert scrub_private("2026-10-14T14:34:00+08:00, email me@example.com") == (
+        "2026-10-14T14:34:00+08:00, email [redacted]"
+    )
+
+    class SearchGateway:
+        async def structured(self, _model, _prompt, _schema, images=None):
+            return QueryAnalysis(generic_name="tumbler", specific_description="blue tumbler",
+                alternative_names=[], category=None, colors=["blue"], material=[], brand=None,
+                model=None, markings=[], distinctive_features=[], condition=[], damage=[],
+                components=[], location="canteen", last_seen_at="2026-10-14T06:34:00Z",
+                searchable_summary=summary, uncertainty=[])
+
+    repo = FakeRepo()
+    result = asyncio.run(run_search(repo, SearchGateway(), "qwen",
+        SearchRequest(description="blue tumbler at canteen", last_seen_at=datetime.fromisoformat("2026-10-14T06:34:00+00:00")),
+        uuid4()))
+    expected = "Blue tumbler at canteen at 2:34pm on October 14, 2026; call [redacted]"
+    assert result.query["summary"] == expected
+    assert repo.search_row["search_summary"] == expected
+    assert repo.search_row["query_analysis"]["searchable_summary"] == expected
+    assert repo.search_row["query_analysis"]["last_seen_at"] == "2026-10-14T06:34:00Z"
+    assert readable_search_summary("2021-08-21T06:30:00Z") == "2:30pm on August 21, 2021"
 
 
 def test_supabase_search_prefilters_by_database_registration_time():
