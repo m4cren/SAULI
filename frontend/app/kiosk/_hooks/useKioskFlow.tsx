@@ -23,7 +23,6 @@ function useKioskFlow() {
   const retrievalInFlight = useRef(false);
   const decodeInFlight = useRef(false);
   const qrFile = useRef<File | null>(null);
-  const captureSource = useRef<"camera" | "upload">("camera");
   const objectUrls = useRef<Record<ImageKind, string | null>>({ front: null, back: null, qr: null });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const slots: readonly Compartment[] = [...pocketCodes.map((id) => ({ id: id as Compartment["id"], size: "Pocket-size" as const, occupied: false })),
@@ -84,7 +83,6 @@ function useKioskFlow() {
     setAvailabilityError(false);
     files.current = { front: null, back: null };
     qrFile.current = null;
-    captureSource.current = "camera";
     confirmationKey.current = null;
     setAnalysis(null);
     dispatch({ type: "RESET" });
@@ -122,12 +120,19 @@ function useKioskFlow() {
     setBusy(true);
     try {
       const result = await analyzeFoundItem(files.current.front, files.current.back, state.foundLocation);
+      if (result.analysis.object_count < 1) { dispatch({ type: "CAPTURE_REJECTED", reason: "noItem" }); return; }
+      if (!result.analysis.views_consistent) { dispatch({ type: "DIFFERENT_ITEM" }); return; }
+      const explicitKind = [result.analysis.category, result.analysis.generic_name].map((value) => value.trim().toLowerCase());
+      if (explicitKind.includes("loose money")) { dispatch({ type: "CAPTURE_REJECTED", reason: "looseMoney" }); return; }
+      if (explicitKind.includes("hazardous item") || explicitKind.includes("unsafe item")) { dispatch({ type: "CAPTURE_REJECTED", reason: "hazardousItem" }); return; }
       setAnalysis(result.analysis);
       dispatch({ type: "IDENTIFIED", size: result.analysis.storage_size, review: { name: result.analysis.object_name, summary: result.summary,
         category: result.analysis.category, color: result.analysis.colors.join(", "),
         material: result.analysis.material.join(", "), size: result.analysis.storage_size === "pocket" ? "Pocket-size" : "Medium-size" } });
     } catch (error) {
-      dispatch({ type: "IDENTIFY_FAILED", message: error instanceof Error ? error.message : "Analysis failed." });
+      const reason = error instanceof SauliApiError && ({ NO_ITEM_DETECTED: "noItem", HAZARDOUS_ITEM: "hazardousItem", LOOSE_MONEY: "looseMoney" } as const)[error.code as "NO_ITEM_DETECTED" | "HAZARDOUS_ITEM" | "LOOSE_MONEY"];
+      if (reason) dispatch({ type: "CAPTURE_REJECTED", reason });
+      else dispatch({ type: "IDENTIFY_FAILED", message: error instanceof Error ? error.message : "Analysis failed." });
     } finally { setBusy(false); }
   }
 
@@ -238,7 +243,6 @@ function useKioskFlow() {
   return {
     state, slots, availableCount, availability, availabilityError, busy, analysis,
     selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
-    captureSource, chooseCaptureSource: (source: "camera" | "upload") => { captureSource.current = source; },
     startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),
     acceptSide: (side: "front" | "back") => dispatch({ type: "SIDE_ACCEPTED", side }),
@@ -249,6 +253,7 @@ function useKioskFlow() {
     simulatePlacementRemoved: () => dispatch({ type: "WRONG_PLACEMENT_REMOVED" }),
     simulateCorrectPlacement,
     simulateDoorClosed: () => dispatch({ type: "DOOR_CLOSED" }),
+    unlockDoor: () => dispatch({ type: "UNLOCK_DOOR" }),
     showItemLocation: () => dispatch({ type: "SHOW_ITEM_LOCATION" }),
     simulateWrongItem: () => void simulateRetrieval("wrong-item"),
     simulateItemReturned: () => void simulateRetrieval("item-returned"),

@@ -31,6 +31,8 @@ export type KioskAction =
   | { type: "LOCATION_CHANGED"; value: string }
   | { type: "IDENTIFY_STARTED" }
   | { type: "IDENTIFIED"; review: ReviewFields; size: StorageSize }
+  | { type: "DIFFERENT_ITEM" }
+  | { type: "CAPTURE_REJECTED"; reason: "noItem" | "hazardousItem" | "looseMoney" }
   | { type: "IDENTIFY_FAILED"; message: string }
   | { type: "REVIEW_RECONCILED"; review: ReviewFields; size: StorageSize }
   | { type: "CORRECTION_NOTE_CHANGED"; value: string }
@@ -38,6 +40,7 @@ export type KioskAction =
   | { type: "RETAKE_PHOTOS" }
   | { type: "RETAKE_SIDE"; side: "front" | "back" }
   | { type: "FOUND_CONFIRMED"; assignment?: ConfirmedItem }
+  | { type: "UNLOCK_DOOR" }
   | { type: "PLACEMENT_SUCCEEDED"; assignment: ConfirmedItem }
   | { type: "WRONG_PLACEMENT" }
   | { type: "WRONG_PLACEMENT_REMOVED" }
@@ -73,17 +76,21 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     case "IDENTIFY_STARTED": return screen.mode === "found" && screen.step === "foundLocation" && state.images.front && state.images.back && state.foundLocation.trim()
       ? { ...state, screen: { mode: "found", step: "identifying" }, error: null } : state;
     case "IDENTIFIED": return screen.mode === "found" && screen.step === "identifying" ? { ...state, screen: { mode: "found", step: "review" }, review: action.review, storageSize: action.size } : state;
+    case "DIFFERENT_ITEM": return screen.mode === "found" && screen.step === "identifying" ? { ...state, screen: { mode: "found", step: "differentItem" }, error: null } : state;
+    case "CAPTURE_REJECTED": return screen.mode === "found" && screen.step === "identifying" ? { ...state, screen: { mode: "found", step: action.reason }, error: null } : state;
     case "IDENTIFY_FAILED": return screen.mode === "found" && screen.step === "identifying" ? { ...state, screen: { mode: "found", step: "foundLocation" }, error: action.message } : state;
     case "REVIEW_RECONCILED": return screen.mode === "found" && screen.step === "review" ? { ...state, screen: { mode: "found", step: "summary" }, review: action.review, storageSize: action.size, error: null } : state;
     case "CORRECTION_NOTE_CHANGED": return screen.mode === "found" && screen.step === "review" ? { ...state, correctionNote: action.value } : state;
     case "SAVE_REVIEW": return screen.mode === "found" && screen.step === "review"
       ? { ...state, screen: { mode: "found", step: "summary" }, error: null } : state;
     case "RETAKE_PHOTOS": return screen.mode === "found" && !modal ? { ...state, screen: { mode: "found", step: "captureFront" }, images: { ...state.images, front: null, back: null }, storageSize: null, error: null } : state;
-    case "RETAKE_SIDE": return screen.mode === "found" && screen.step === "foundLocation" && !modal
+    case "RETAKE_SIDE": return screen.mode === "found" && (screen.step === "foundLocation" || screen.step === "differentItem") && !modal
       ? { ...state, screen: { mode: "found", step: action.side === "front" ? "captureFront" : "captureBack" },
         images: { ...state.images, [action.side]: null }, storageSize: null, error: null } : state;
     case "FOUND_CONFIRMED": return screen.mode === "found" && screen.step === "summary"
-      ? { ...state, screen: { mode: "found", step: "placement" }, assignment: action.assignment ?? null, images: { ...state.images, front: null, back: null }, error: null } : state;
+      ? { ...state, screen: { mode: "found", step: "readyToStore" }, assignment: action.assignment ?? null, images: { ...state.images, front: null, back: null }, error: null } : state;
+    case "UNLOCK_DOOR": return screen.mode === "found" && screen.step === "readyToStore" && state.assignment
+      ? { ...state, screen: { mode: "found", step: "placement" } } : state;
     case "PLACEMENT_SUCCEEDED": return screen.mode === "found" && screen.step === "placement"
       ? { ...state, screen: { mode: "found", step: "stored" }, assignment: action.assignment, error: null } : state;
     case "WRONG_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, modal: "wrongPlacement" } : state;

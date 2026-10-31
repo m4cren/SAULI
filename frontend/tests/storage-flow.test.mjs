@@ -7,13 +7,19 @@ import { initialClaimantState, claimantReducer } from "../libs/claimant/claimant
 const assigned = { item_id: "item-1", status: "available", storage_size: "medium", section: "Medium-size", slot_code: "M-02", slot_status: "reserved", placement_status: "reserved" };
 
 test("shared cabinet layout contains exactly the supported unique positions", () => {
-  assert.equal(pocketCodes.length, 10);
-  assert.equal(mediumCodes.length, 5);
-  assert.equal(new Set(slotCodes).size, 15);
+  assert.equal(pocketCodes.length, 8);
+  assert.equal(mediumCodes.length, 4);
+  assert.equal(new Set(slotCodes).size, 12);
   assert.equal(slotCodes[0], "P-01");
-  assert.equal(slotCodes.at(-1), "M-05");
+  assert.equal(pocketCodes.at(-1), "P-08");
+  assert.equal(slotCodes.at(-1), "M-04");
   assert.ok(isSlotCode("M-02"));
+  for (const removed of ["P-09", "P-10", "M-05"]) assert.ok(!isSlotCode(removed));
   assert.ok(!isSlotCode("C3"));
+  const allRows = [...slotCodes.map(() => ({ status: "available", is_active: true })),
+    ...["P-09", "P-10", "M-05"].map(() => ({ status: "available", is_active: false }))];
+  assert.equal(slotTotals(allRows).total, 12);
+  assert.equal(slotTotals(allRows).available, 12);
 });
 
 test("kiosk uses the assigned API position and requires placement before success", () => {
@@ -23,6 +29,8 @@ test("kiosk uses the assigned API position and requires placement before success
   assert.equal(state.storageSize, "medium");
   state = kioskReducer(state, { type: "FOUND_CONFIRMED", assignment: assigned });
   assert.equal(state.assignment.slot_code, "M-02");
+  assert.equal(state.screen.step, "readyToStore");
+  state = kioskReducer(state, { type: "UNLOCK_DOOR" });
   assert.equal(state.screen.step, "placement");
   state = kioskReducer(state, { type: "PLACEMENT_SUCCEEDED", assignment: { ...assigned, slot_status: "occupied", placement_status: "placed" } });
   assert.equal(state.screen.step, "stored");
@@ -45,7 +53,8 @@ test("claimant confirmation does not reveal a storage position", () => {
 });
 
 test("admin totals change when a polled slot changes state", () => {
-  const first = [{ status: "available" }, { status: "reserved" }, { status: "occupied" }];
-  assert.deepEqual(slotTotals(first), { available: 1, reserved: 1, occupied: 1, out_of_service: 0 });
-  assert.deepEqual(slotTotals([{ status: "occupied" }, ...first.slice(1)]), { available: 0, reserved: 1, occupied: 2, out_of_service: 0 });
+  const first = [{ status: "available" }, { status: "reserved" }, { status: "occupied" }, { status: "out_of_service" }];
+  assert.deepEqual(slotTotals(first), { total: 4, available: 1, reserved: 1, occupied: 1, out_of_service: 1, unavailable: 2 });
+  assert.deepEqual(slotTotals([{ status: "occupied" }, ...first.slice(1), { status: "occupied", is_active: false }]),
+    { total: 4, available: 0, reserved: 1, occupied: 2, out_of_service: 1, unavailable: 2 });
 });

@@ -6,6 +6,7 @@
 
 1. **Report a found item.** At the kiosk, a finder takes two photos and records where the item was found. A local Qwen model analyzes the images and suggests an item description and storage size. The finder can review and correct the description.
 2. **Store the item.** The API saves the item in Supabase and reserves an available pocket-size or medium-size position. In the current prototype, placement and door actions are simulated in the web interface.
+   The finalized cabinet has 8 pocket positions (P-01 through P-08) and 4 medium positions (M-01 through M-04). Older position records remain in Supabase for history but cannot receive new assignments after the 12-position migration.
 3. **Search for a missing item.** A claimant signs in with Facebook, describes the item, and searches eligible stored items. The app uses Qwen to rank possible matches. The claimant can also post a missing-item report to watch for items placed later.
 4. **Notify and review.** When a newly placed item qualifies as a possible match, the backend queues an email alert through EmailJS. The claimant reviews the candidate in SAULI and decides whether it is theirs. An alert is a possible match, not proof of ownership.
 5. **Retrieve the item.** Confirming a match creates a one-time QR pass. The kiosk validates it and shows the assigned position. Web controls simulate correct removal, wrong-item removal, and return; the claimant page follows retrieval status. A completed retrieval is recorded and the position becomes available again.

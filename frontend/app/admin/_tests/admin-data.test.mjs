@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterRetrievals, retrievalRecords, toCsv, manilaDateKey, hasPrototypeFootage } from "../_data/mockAdminData.ts";
+import { filterRetrievals, retrievalRecords, toCsv, manilaDateKey, hasPrototypeFootage, hardwareItems } from "../_data/mockAdminData.ts";
 import { setDoorUnlocked } from "../_lib/adminState.ts";
 
 test("retrieval filters combine case-insensitive search, Manila date, and compartment", () => {
@@ -8,6 +8,14 @@ test("retrieval filters combine case-insensitive search, Manila date, and compar
   assert.equal(filterRetrievals(retrievalRecords, "wallet", "2026-09-08", "P-07").length, 0);
   assert.equal(filterRetrievals(retrievalRecords, "", "2026-09-09", "").length, 2);
   assert.equal(manilaDateKey("2026-09-08T18:00:00Z"), "2026-09-09");
+  const historical = { ...retrievalRecords[0], compartment: "P-09" };
+  assert.equal(filterRetrievals([historical], "", "", "P-09")[0], historical);
+});
+
+test("hardware labels follow the finalized cabinet layout", () => {
+  assert.match(hardwareItems.find((item) => item.id === "pocket-door").description, /pocket-size compartments/);
+  assert.match(hardwareItems.find((item) => item.id === "medium-door").description, /medium-size compartments/);
+  assert.doesNotMatch(hardwareItems.map((item) => item.description).join(" "), /P-09|P-10|M-05/);
 });
 
 test("CSV exports only selected records and escapes values", () => {

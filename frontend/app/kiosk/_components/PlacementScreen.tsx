@@ -1,15 +1,25 @@
 "use client";
+
 import Button from "@/app/components/Button";
 import { useKiosk } from "../_hooks/useKioskFlow";
 import CompartmentMap from "./CompartmentMap";
 import FlowHeading from "./FlowHeading";
+import SensorStatusCard from "./SensorStatusCard";
 
 export default function PlacementScreen() {
   const kiosk = useKiosk();
   const assignment = kiosk.state.assignment;
   if (!assignment) return <p role="alert">No storage position has been assigned.</p>;
-  return <><FlowHeading flow="found" current={3} title={`${assignment.section} door is ready`} subtitle={`Place the item in the highlighted position ${assignment.slot_code}.`} />
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(310px,1fr)]"><CompartmentMap slots={kiosk.slots} assignedCode={assignment.slot_code} section={assignment.section} />
-      <section className="flex flex-col rounded-2xl border border-[#d4d4d4] bg-white p-5"><span className="w-fit rounded-md bg-[#d9eeeb] px-3 py-1 text-xs font-semibold text-[#0b474f]">Position {assignment.slot_code}</span><h2 className="mt-8 text-xl font-semibold text-[#092a2f]">Waiting for item placement</h2><p className="mt-1 text-sm text-[#444]">Put the item in {assignment.slot_code}, then record the simulated placement.</p><p className="mt-5 text-xs text-[#666]">This is a web simulation. No physical door or sensor is connected.</p>{kiosk.state.error && <p role="alert" className="mt-4 text-sm text-red-700">{kiosk.state.error}</p>}<Button type="button" className="mt-auto w-full" disabled={kiosk.busy} onClick={kiosk.simulateCorrectPlacement}>{kiosk.busy ? "Recording placement…" : "Simulate item placed"}</Button></section>
-    </div></>;
+  const section = assignment.section === "medium" || assignment.section === "Medium-size" ? "Medium-size" : "Pocket-size";
+  return <><FlowHeading flow="found" current={3} title={`${section} door is now unlocked`} subtitle={`Place the item carefully in ${assignment.slot_code}, then close the door.`} />
+    <div className="kiosk-grid"><CompartmentMap slots={kiosk.slots} assignedCode={assignment.slot_code} section={section} />
+      <section className="kiosk-card flex flex-col p-4 sm:p-5"><span className="kiosk-pill w-fit">POSITION {assignment.slot_code}</span>
+        <div aria-hidden="true" className="mx-auto mt-2 flex h-18 items-center justify-center text-6xl text-[#149e93]">↓<span className="ml-1 text-5xl">▱</span></div>
+        <h2 className="text-[clamp(20px,2.1vw,28px)] font-bold">Waiting for item placement</h2><p className="text-sm text-[#53646c]">Place the item fully in {assignment.slot_code}. SAULI will confirm it automatically.</p>
+        <ol className="mt-3 grid gap-1 text-sm"><li><strong>1.</strong> Open the {section.toLowerCase()} door.</li><li><strong>2.</strong> Place the item in {assignment.slot_code}.</li><li><strong>3.</strong> Close the door carefully.</li></ol>
+        <div className="mt-auto"><SensorStatusCard title="Placement sensor active" detail="Waiting for the item to be placed" />
+          {kiosk.state.error && <p role="alert" className="mt-2 text-sm text-red-700">{kiosk.state.error}</p>}
+          {process.env.NODE_ENV === "development" && <details className="mt-2 rounded-lg border border-dashed border-[#a8d6d1] p-2 text-sm"><summary className="cursor-pointer font-semibold">Hardware simulation</summary><Button type="button" disabled={kiosk.busy} onClick={kiosk.simulateCorrectPlacement} className="mt-2 w-full">{kiosk.busy ? "Recording placement…" : "Simulate item placed"}</Button></details>}
+        </div>
+      </section></div></>;
 }

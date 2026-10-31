@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getRetrievalLogs } from "@/libs/api/sauli";
-import { slotCodes as compartmentIds } from "@/libs/storage/slots";
+import { isSlotCode, slotCodes as compartmentIds } from "@/libs/storage/slots";
 import { filterRetrievals, formatManilaDate, toCsv } from "../_data/mockAdminData";
 import type { RetrievalRecord } from "../_types/admin";
 import AdminIcon from "./AdminIcon";
@@ -18,6 +18,7 @@ export default function RetrievalLogs() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const filtered = useMemo(() => filterRetrievals(records, search, date, compartment), [records, search, date, compartment]);
+  const historicalCompartmentIds = useMemo(() => [...new Set(records.map((record) => record.compartment).filter((code) => !isSlotCode(code)))].sort(), [records]);
   const refresh = useCallback(async () => {
     try {
       const rows = await getRetrievalLogs();
@@ -54,7 +55,7 @@ export default function RetrievalLogs() {
       <div className="admin-log-filters">
         <label className="admin-search-field"><span className="admin-sr-only">Search retrievals</span><AdminIcon name="search" size={19} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search retriever, item, ID, or compartment" /></label>
         <label className="admin-filter-field"><span>Date</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
-        <label className="admin-filter-field"><span>Compartment</span><select value={compartment} onChange={(event) => setCompartment(event.target.value)}><option value="">All compartments</option>{compartmentIds.map((id) => <option key={id} value={id}>{id}</option>)}</select></label>
+        <label className="admin-filter-field"><span>Compartment</span><select value={compartment} onChange={(event) => setCompartment(event.target.value)}><option value="">All compartments</option>{compartmentIds.map((id) => <option key={id} value={id}>{id}</option>)}{historicalCompartmentIds.map((id) => <option key={id} value={id}>{id} (historical)</option>)}</select></label>
         <button type="button" className="admin-text-action" onClick={clear} disabled={!search && !date && !compartment}>Clear filters</button>
       </div>
       {error && <p role="alert" className="m-4 text-sm text-red-700">{error} <button type="button" onClick={() => void refresh()} className="underline">Retry</button></p>}

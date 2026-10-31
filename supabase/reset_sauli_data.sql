@@ -3,8 +3,9 @@
 -- Empty the sauli-item-images bucket through Supabase Storage first if you
 -- also want to delete the uploaded image files. Never DELETE from storage.objects.
 -- This file is not a migration and must not be included in db push.
--- It preserves auth.users, auth.identities, the bucket, schema, and all 15
--- seeded storage_slots rows, including their stable IDs and codes.
+-- It preserves auth.users, auth.identities, the bucket, schema, and all
+-- storage_slots rows, including the three retired positions and their IDs.
+-- After the 12-slot migration, only P-01..P-08 and M-01..M-04 stay active.
 -- Retrieval sessions, events, completed logs, and resolved reports are also cleared.
 
 begin;
@@ -62,7 +63,11 @@ begin
          or current_found_item_id is not null
          or reserved_at is not null
          or occupied_at is not null
-    ) then
+    )
+    or (select count(*) from public.storage_slots where is_active) <> 12
+    or (select count(*) from public.storage_slots where is_active and size_class = 'pocket') <> 8
+    or (select count(*) from public.storage_slots where is_active and size_class = 'medium') <> 4
+    then
     raise exception 'SAULI data reset verification failed';
   end if;
 end;
@@ -81,6 +86,7 @@ commit;
 -- union all select 'missing_reports', count(*) from public.missing_reports
 -- union all select 'matching_jobs', count(*) from public.matching_jobs
 -- union all select 'email_notifications', count(*) from public.email_notifications
--- union all select 'available_storage_slots', count(*) from public.storage_slots
---   where status = 'available' and current_found_item_id is null;
--- Expected counts: zero application records and 15 available slots.
+-- union all select 'available_active_storage_slots', count(*) from public.storage_slots
+--   where is_active and status = 'available' and current_found_item_id is null;
+-- Expected counts: zero application records, 12 available active slots,
+-- plus the three preserved inactive rows (also released by this script).

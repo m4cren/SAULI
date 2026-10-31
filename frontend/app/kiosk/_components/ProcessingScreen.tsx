@@ -1,4 +1,16 @@
-export default function ProcessingScreen({ kind }: { kind: "identify" | "qr" }) {
+import Icon from "@/app/components/Icon";
+import KioskProgress from "./KioskProgress";
+
+export default function ProcessingScreen({ kind }: { kind: "identify" | "qr" | "storage" }) {
   const identify = kind === "identify";
-  return <div className="flex min-h-[calc(100dvh-170px)] items-center justify-center"><div role="status" aria-live="polite" className="flex min-h-[310px] w-full max-w-[670px] flex-col items-center justify-center rounded-2xl border-2 border-[#d6d6d6] bg-white p-8 text-center"><span aria-hidden="true" className="mb-4 size-11 animate-spin rounded-full border-4 border-[#d2e8e5] border-t-[#0b474f]" /><p className="text-xs font-bold uppercase tracking-[0.08em] text-[#0b474f]">{identify ? "Two sides received" : "Checking authorization"}</p><h1 className="mt-4 text-2xl font-semibold text-[#092a2f]">{identify ? "Identifying the item…" : "Verifying your QR code…"}</h1><p className="mt-1 text-sm text-[#555]">{identify ? "SAULI is preparing the item preview." : "SAULI is checking the one-time code before revealing a position."}</p></div></div>;
+  const storage = kind === "storage";
+  return <div className="flex min-h-[calc(100dvh-100px)] items-center justify-center"><section role="status" aria-live="polite" className="kiosk-card flex w-full max-w-[740px] flex-col items-center justify-center gap-3 px-6 py-8 text-center">
+    {kind === "qr" && <KioskProgress flow="retrieve" current={2} />}
+    <span className="kiosk-electronic mt-4" aria-hidden="true"><Icon name={identify ? "camera" : storage ? "check" : "search"} size={47} /></span>
+    <span className="kiosk-pill mt-5">{identify ? "TWO SIDES RECEIVED" : storage ? "ITEM DETAILS CONFIRMED" : "CHECKING AUTHORIZATION"}</span>
+    <h1 className="text-[clamp(26px,3vw,38px)] font-bold">{identify ? "Identifying the item…" : storage ? "Checking storage availability…" : "Verifying your QR code"}</h1>
+    <p className="text-base text-[#53646c]">{identify ? "SAULI is preparing the item preview." : storage ? "SAULI is applying corrections and finding an available compartment." : "Please wait while SAULI confirms your retrieval access."}</p>
+    {kind === "qr" && <div className="mt-3 flex flex-wrap justify-center gap-3 text-sm"><span>✓ QR detected</span><span>● Checking access</span><span className="text-[#8e9ba2]">○ Preparing location</span></div>}
+    {storage && <div className="mt-3 grid gap-1 text-left text-sm"><span>✓ Item details updated</span><span>◌ Checking available compartments</span></div>}
+  </section></div>;
 }

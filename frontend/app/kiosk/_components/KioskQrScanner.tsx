@@ -28,18 +28,19 @@ export default function KioskQrScanner({ onDecoded }: { onDecoded: (payload: str
       controls = value; setScanning(true);
     }).catch(() => {
       stopMediaTracks(videoElement.srcObject as MediaStream | null);
-      if (active) setError("Camera permission was denied or no webcam is available. You can upload a QR image instead.");
+      if (active) setError("Camera permission was denied or no webcam is available.");
     });
-    return () => {
-      active = false;
-      controls?.stop();
-      stopMediaTracks(videoElement.srcObject as MediaStream | null);
-    };
+    return () => { active = false; controls?.stop(); stopMediaTracks(videoElement.srcObject as MediaStream | null); };
   }, []);
 
-  return <div className="rounded-xl border border-[#9fc3c0] bg-[#eef6f5] p-3">
-    <video ref={video} autoPlay muted playsInline aria-label="Webcam QR scanner" className="mx-auto max-h-80 w-full rounded-lg bg-black object-contain" />
-    <p role="status" className="mt-2 text-sm">{error ? "Camera unavailable" : scanning ? "Scanning for a SAULI retrieval QR…" : "Requesting camera permission…"}</p>
-    {error && <p role="alert" className="mt-2 text-sm text-red-700">{error}</p>}
+  return <div className="kiosk-card min-w-0 overflow-hidden bg-[#0b474f] p-3 text-white">
+    <div className="relative flex h-[min(52vh,390px)] min-h-[245px] items-center justify-center overflow-hidden rounded-xl bg-[#0b343a]">
+      <video ref={video} autoPlay muted playsInline aria-label="Webcam QR scanner" className="h-full w-full object-contain" />
+      <span className="kiosk-scan-corner tl" aria-hidden="true" /><span className="kiosk-scan-corner tr" aria-hidden="true" /><span className="kiosk-scan-corner bl" aria-hidden="true" /><span className="kiosk-scan-corner br" aria-hidden="true" />
+      {scanning && <span className="kiosk-scan-line" aria-hidden="true" />}
+      <p className="absolute left-3 top-3 rounded-full border border-[#53c7b5] bg-[#0b474f]/90 px-3 py-1 text-sm font-bold">{error ? "CAMERA UNAVAILABLE" : scanning ? "● CAMERA READY" : "REQUESTING CAMERA"}</p>
+    </div>
+    <p role="status" className="mt-2 text-center text-sm">{error ? "Camera unavailable" : scanning ? "Keep the entire QR code inside the frame" : "Requesting camera permission…"}</p>
+    {error && <p role="alert" className="mt-2 text-sm text-red-200">{error}</p>}
   </div>;
 }

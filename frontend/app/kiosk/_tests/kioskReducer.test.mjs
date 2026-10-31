@@ -36,9 +36,43 @@ test("a corrected Qwen size replaces the original suggestion", () => {
   assert.equal(state.storageSize, "medium");
 });
 
+test("inconsistent views keep side one and send side two back for capture", () => {
+  let state = move(initialKioskState, { type: "START_FOUND" });
+  state = move(state, { type: "IMAGE_SELECTED", kind: "front", url: "blob:first" });
+  state = move(state, { type: "SIDE_ACCEPTED", side: "front" });
+  state = move(state, { type: "IMAGE_SELECTED", kind: "back", url: "blob:other" });
+  state = move(state, { type: "SIDE_ACCEPTED", side: "back" });
+  state = move(state, { type: "LOCATION_CHANGED", value: "Library" });
+  state = move(state, { type: "IDENTIFY_STARTED" });
+  state = move(state, { type: "DIFFERENT_ITEM" });
+  assert.equal(state.screen.step, "differentItem");
+  state = move(state, { type: "RETAKE_SIDE", side: "back" });
+  assert.equal(state.screen.step, "captureBack");
+  assert.equal(state.images.front, "blob:first");
+  assert.equal(state.images.back, null);
+  assert.equal(state.foundLocation, "Library");
+});
+
+test("explicit analysis rejection does not create an assignment", () => {
+  for (const reason of ["noItem", "hazardousItem", "looseMoney"]) {
+    let state = move(initialKioskState, { type: "START_FOUND" });
+    state = move(state, { type: "IMAGE_SELECTED", kind: "front", url: "blob:first" });
+    state = move(state, { type: "SIDE_ACCEPTED", side: "front" });
+    state = move(state, { type: "IMAGE_SELECTED", kind: "back", url: "blob:second" });
+    state = move(state, { type: "SIDE_ACCEPTED", side: "back" });
+    state = move(state, { type: "LOCATION_CHANGED", value: "Library" });
+    state = move(state, { type: "IDENTIFY_STARTED" });
+    state = move(state, { type: "CAPTURE_REJECTED", reason });
+    assert.equal(state.screen.step, reason);
+    assert.equal(state.assignment, null);
+  }
+});
+
 test("wrong placement blocks correct placement until removal", () => {
   let state = { ...initialKioskState, screen: { mode: "found", step: "summary" }, review };
-  state = move(state, { type: "FOUND_CONFIRMED" });
+  state = move(state, { type: "FOUND_CONFIRMED", assignment: { item_id: "item-1", slot_code: "P-07", section: "pocket" } });
+  assert.equal(state.screen.step, "readyToStore");
+  state = move(state, { type: "UNLOCK_DOOR" });
   assert.equal(state.screen.step, "placement");
   state = move(state, { type: "WRONG_PLACEMENT" });
   assert.equal(state.modal, "wrongPlacement");

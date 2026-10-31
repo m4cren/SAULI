@@ -1,0 +1,32 @@
+.kiosk-shell {
+  --kiosk-ink: #072e38;
+  --kiosk-teal: #0b474f;
+  --kiosk-accent: #299f93;
+  position: relative;
+  isolation: isolate;
+  min-height: 100dvh;
+  overflow-x: clip;
+  color: var(--kiosk-ink);
+  background: radial-gradient(circle at 0 96%, #e0f8f4 0, transparent 30%), radial-gradient(circle at 100% 8%, #e4f9f6 0, transparent 30%), #fcfefe;
+}
+.kiosk-circuit { position: absolute; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; opacity: .7; }
+.kiosk-main { position: relative; z-index: 1; width: min(100% - 48px, 1400px); margin: 0 auto; padding: 22px 0 28px; }
+.kiosk-card { min-width: 0; border: 1px solid #d3e2e2; border-radius: 19px; background: rgba(255,255,255,.97); box-shadow: 0 5px 20px #0b474f0b; }
+.kiosk-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr); gap: 16px; align-items: stretch; }
+.kiosk-button { min-height: 50px; width: 100%; border-radius: 11px; font-size: clamp(16px,1.5vw,21px); }
+.kiosk-button-primary { background: linear-gradient(180deg,#0b474f 0%,#299f93 100%); }
+.kiosk-muted { color: #53646c; }
+.kiosk-pill { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; background: #dcf5f1; color: #075f62; padding: 5px 12px; font-size: 13px; font-weight: 700; }
+.kiosk-electronic { position: relative; display: grid; place-items: center; width: 96px; height: 96px; border: 2px solid #71d6cb; border-radius: 50%; color: #0b7778; background: #e5f9f5; box-shadow: 0 0 0 12px #eaf8f7, 0 0 0 14px #b5eae6; }
+.kiosk-electronic::after { content: ""; position: absolute; inset: -15px; border: 3px solid transparent; border-top-color: #00a99d; border-right-color: #8cddd5; border-radius: 50%; animation: kiosk-turn 2.7s linear infinite; }
+@keyframes kiosk-turn { to { transform: rotate(360deg); } }
+.kiosk-scan-corner { position: absolute; width: 42px; height: 42px; border-color: #5de9dc; border-style: solid; border-width: 0; z-index: 2; }
+.kiosk-scan-corner.tl { top: 12%; left: 17%; border-top-width: 6px; border-left-width: 6px; border-top-left-radius: 13px; }
+.kiosk-scan-corner.tr { top: 12%; right: 17%; border-top-width: 6px; border-right-width: 6px; border-top-right-radius: 13px; }
+.kiosk-scan-corner.bl { bottom: 12%; left: 17%; border-bottom-width: 6px; border-left-width: 6px; border-bottom-left-radius: 13px; }
+.kiosk-scan-corner.br { bottom: 12%; right: 17%; border-bottom-width: 6px; border-right-width: 6px; border-bottom-right-radius: 13px; }
+.kiosk-scan-line { position: absolute; left: 17%; right: 17%; top: 50%; height: 3px; background: #5de9dc; box-shadow: 0 0 18px #5de9dc; animation: kiosk-scan 3s ease-in-out infinite alternate; }
+@keyframes kiosk-scan { from { transform: translateY(-60px); } to { transform: translateY(60px); } }
+@media (max-width: 700px) { .kiosk-main { width: min(100% - 28px, 600px); } .kiosk-grid { grid-template-columns: 1fr; } }
+@media (max-height: 650px) and (min-width: 900px) { .kiosk-main { padding-top: 15px; padding-bottom: 15px; } .kiosk-card { border-radius: 16px; } }
+@media (prefers-reduced-motion: reduce) { .kiosk-electronic::after, .kiosk-scan-line { animation: none; } }

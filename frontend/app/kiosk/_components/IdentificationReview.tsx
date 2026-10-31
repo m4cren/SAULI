@@ -4,27 +4,20 @@ import Button from "@/app/components/Button";
 import { useKiosk } from "../_hooks/useKioskFlow";
 import FlowHeading from "./FlowHeading";
 import ImagePairPreview from "./ImagePairPreview";
+import ProcessingScreen from "./ProcessingScreen";
 
 export default function IdentificationReview() {
   const kiosk = useKiosk();
   const { front, back } = kiosk.state.images;
   if (!front || !back) return null;
-
-  return <>
-    <FlowHeading flow="found" current={2} title="Review item details" subtitle="Correct anything that does not match the item before confirming." />
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1.55fr)_minmax(340px,1fr)]">
-      <ImagePairPreview front={front} back={back} />
-      <section className="flex min-h-[410px] flex-col rounded-2xl border border-[#d4d4d4] bg-white p-4">
-        <h2 id="identified-summary-label" className="mb-1 text-sm font-semibold text-[#092a2f]">SAULI summary <span className="ml-1 font-normal text-[#666]">(preview only)</span></h2>
-        <div aria-labelledby="identified-summary-label" className="min-h-24 rounded-md border border-[#e4e4e4] bg-[#e4e4e4] px-3 py-2 text-sm leading-relaxed text-[#505050]">{kiosk.state.review.summary}</div>
-        <label htmlFor="correction-note" className="mb-1 mt-4 text-sm font-semibold text-[#092a2f]">Correction note <span className="font-normal text-[#555]">(optional)</span></label>
-        <textarea id="correction-note" maxLength={1500} value={kiosk.state.correctionNote} onChange={(event) => kiosk.setCorrectionNote(event.target.value)} rows={4} className="min-h-24 w-full resize-y rounded-md border border-[#ccc] px-3 py-2 text-sm outline-none focus-visible:outline-2 focus-visible:outline-[#0b474f]" />
-        {kiosk.state.error && <p role="alert" className="mt-2 text-sm text-red-700">{kiosk.state.error}</p>}
-        <div className="mt-auto pt-3">
-          <p className="mb-4 text-xs text-[#555]">SAULI can make mistakes. Check important information before saving.</p>
-          <Button type="button" onClick={kiosk.saveReview} disabled={kiosk.busy} className="w-full">{kiosk.busy ? "Applying correction…" : "Confirm item details"}</Button>
-        </div>
-      </section>
-    </div>
+  if (kiosk.busy) return <ProcessingScreen kind="storage" />;
+  return <><FlowHeading flow="found" current={2} title="Review item details" subtitle="Correct anything that does not match the item before saving." />
+    <section className="kiosk-card mb-3 p-4"><h2 className="text-lg font-bold">SAULI summary <span className="text-sm font-normal text-[#7c8b91]">preview</span></h2><p className="mt-2 rounded-xl border border-[#dce7e8] bg-[#f2f7f7] px-4 py-3 text-base text-[#4f646c]">{kiosk.state.review.summary}</p><p className="mt-1 text-sm text-[#87929a]">SAULI can make mistakes. Review the details before saving.</p></section>
+    <div className="kiosk-grid"><ImagePairPreview front={front} back={back} />
+      <section className="kiosk-card flex flex-col gap-3 p-4"><div><label htmlFor="review-location" className="mb-1 block text-base font-bold">Where was the item found?</label><input id="review-location" required maxLength={200} value={kiosk.state.foundLocation} onChange={(event) => kiosk.setLocation(event.target.value)} placeholder="e.g. Campus gym" className="min-h-12 w-full rounded-lg border border-[#b8ccd0] bg-white px-3 text-base focus-visible:outline-2 focus-visible:outline-[#0b474f]" /></div>
+      <div><label htmlFor="correction-note" className="mb-1 block text-base font-bold">Correction note <span className="font-normal">(optional)</span></label><textarea id="correction-note" maxLength={1500} value={kiosk.state.correctionNote} onChange={(event) => kiosk.setCorrectionNote(event.target.value)} rows={3} placeholder="Describe what needs to be corrected" className="min-h-20 w-full resize-y rounded-lg border border-[#b8ccd0] bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-[#0b474f]" /></div>
+      {kiosk.state.error && <p role="alert" className="text-sm text-red-700">{kiosk.state.error}</p>}
+      </section></div>
+    <Button type="button" onClick={kiosk.saveReview} disabled={!kiosk.state.foundLocation.trim()} className="kiosk-button kiosk-button-primary mt-3">Confirm item details</Button>
   </>;
 }

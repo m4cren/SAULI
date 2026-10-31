@@ -27,7 +27,7 @@ export default function useCameraCapture() {
     release();
     setError(null);
     if (!navigator.mediaDevices?.getUserMedia) {
-      setError("This browser cannot access a camera. Use localhost or HTTPS, or upload the images instead.");
+      setError("This browser cannot access a camera. Use localhost or HTTPS and check camera permissions.");
       setStatus("error");
       return;
     }
@@ -41,7 +41,7 @@ export default function useCameraCapture() {
         track.addEventListener("ended", () => {
           if (streamRef.current !== stream) return;
           release();
-          setError("The camera disconnected. Reconnect it and try again, or upload an image instead.");
+          setError("The camera disconnected. Reconnect it and try again.");
           setStatus("error");
         }, { once: true });
       }

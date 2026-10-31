@@ -8,25 +8,25 @@ export function stopCameraStream(stream: MediaStream | null): void {
 export function cameraErrorMessage(cause: unknown): string {
   const name = cause instanceof Error ? cause.name : "";
   if (name === "NotAllowedError" || name === "PermissionDeniedError")
-    return "Camera access was not allowed. Enable camera permission in your browser settings or upload the images instead.";
+    return "Camera access was not allowed. Enable camera permission in your browser settings and try again.";
   if (name === "NotFoundError" || name === "DevicesNotFoundError")
-    return "No camera was found. Connect a webcam or upload the images instead.";
+    return "No camera was found. Connect a webcam and try again.";
   if (name === "NotReadableError" || name === "TrackStartError")
-    return "The camera is already in use or could not start. Close other camera apps or upload the images instead.";
-  return "The camera could not start. Use localhost or HTTPS, check your webcam, or upload the images instead.";
+    return "The camera is already in use or could not start. Close other camera apps and try again.";
+  return "The camera could not start. Use localhost or HTTPS, check your webcam, and try again.";
 }
 
 export async function captureVideoFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement, side: "front" | "back"): Promise<File> {
   const { videoWidth: width, videoHeight: height } = video;
   if (!width || !height) throw new Error("Wait for the live camera preview before capturing.");
-  if (width * height > MAX_CAPTURE_PIXELS) throw new Error("The camera image is too large. Choose a lower camera resolution or upload an image instead.");
+  if (width * height > MAX_CAPTURE_PIXELS) throw new Error("The camera image is too large. Choose a lower camera resolution and try again.");
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext("2d");
-  if (!context) throw new Error("The camera frame could not be captured. Try again or upload an image.");
+  if (!context) throw new Error("The camera frame could not be captured. Try again.");
   context.drawImage(video, 0, 0, width, height);
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
-  if (!blob?.size) throw new Error("The camera frame could not be saved. Try again or upload an image.");
-  if (blob.size > MAX_CAPTURE_BYTES) throw new Error("The captured image exceeds 10 MiB. Try a lower camera resolution or upload an image.");
+  if (!blob?.size) throw new Error("The camera frame could not be saved. Try again.");
+  if (blob.size > MAX_CAPTURE_BYTES) throw new Error("The captured image exceeds 10 MiB. Try a lower camera resolution.");
   return new File([blob], `${side}-image.jpg`, { type: "image/jpeg" });
 }

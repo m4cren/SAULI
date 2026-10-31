@@ -26,14 +26,14 @@ ollama serve
 
 In `services/.env`, set `SUPABASE_URL` and the server-only `SUPABASE_SERVICE_ROLE_KEY`, and retain `OLLAMA_MODEL=qwen3.5:9b-q8_0`. `SUPABASE_PUBLISHABLE_KEY` remains for the existing authentication route. The other settings are `OLLAMA_HOST`, `OLLAMA_TIMEOUT_SECONDS`, `SUPABASE_STORAGE_BUCKET`, `SUPABASE_SIGNED_URL_TTL_SECONDS`, `FRONTEND_ORIGIN`, `MAX_IMAGE_BYTES` and `MAX_IMAGE_PIXELS`. Two-image analysis uses a minimum Ollama timeout of 180 seconds; older `.env` values such as 5 seconds are raised to that minimum. Keep `.env` private. Never set a `NEXT_PUBLIC_*` service role variable.
 
-Review both migrations in `supabase/migrations`. The storage migration is additive and seeds exactly 10 pocket and 5 medium positions. It has not been applied automatically. With the Supabase CLI installed and the intended project linked, run from the repository root:
+Review the migrations in `supabase/migrations`. The original storage migration seeded 10 pocket and 5 medium positions. The later 12-position migration retires P-09, P-10, and M-05 without deleting historical references; 8 pocket and 4 medium positions remain active. Migrations are not applied automatically. With the Supabase CLI installed and the intended project linked, run from the repository root:
 
 ```powershell
 supabase db push --dry-run
 supabase db push
 ```
 
-If the initial migration was applied manually outside CLI history, reconcile migration history before pushing or paste only `202610110001_sauli_storage_slots.sql` into the Supabase SQL Editor. Do not reset a remote database. Keep the service-role key only in `services/.env`. The original validated image bytes remain in the private bucket.
+If an earlier migration was applied manually outside CLI history, reconcile migration history before pushing or apply only unapplied SQL files in order through the Supabase SQL Editor. Inspect the removed positions first; the 12-position migration refuses a pending reservation in one of them. Do not reset a remote database. Keep the service-role key only in `services/.env`. The original validated image bytes remain in the private bucket.
 
 Verification SQL after applying:
 
@@ -47,9 +47,11 @@ select routine_name from information_schema.routines where routine_schema = 'pub
 select schemaname, tablename, rowsecurity from pg_tables where schemaname = 'public'
   and tablename in ('found_items','search_requests','match_candidates','storage_slots','storage_slot_events',
     'retrieval_sessions','retrieval_events','retrieval_logs');
-select size_class,status,count(*) from public.storage_slots group by size_class,status order by size_class,status;
-select code,size_class,status from public.storage_slots order by case size_class when 'pocket' then 0 else 1 end,ordinal;
+select size_class,is_active,status,count(*) from public.storage_slots group by size_class,is_active,status order by size_class,is_active,status;
+select code,size_class,is_active,status,current_found_item_id from public.storage_slots order by case size_class when 'pocket' then 0 else 1 end,ordinal;
 ```
+
+The Raspberry Pi controller currently has no defined per-position GPIO, HX711 channel, or 74HC595 output map. Confirm the 8 pocket and 4 medium sensor/light/output assignments with the final wiring plan before hardware integration; do not infer pins from the slot codes.
 
 Start FastAPI from `services/api`:
 

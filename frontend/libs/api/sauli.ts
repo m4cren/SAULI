@@ -1,5 +1,5 @@
 import { createClient } from "@/libs/supabase/browser";
-import type { StorageSize, SlotStatus } from "@/libs/storage/slots";
+import { isSlotCode, type StorageSize, type SlotStatus } from "@/libs/storage/slots";
 
 const baseUrl = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
@@ -43,7 +43,7 @@ export interface FoundItemAnalysis {
 
 export interface AnalysisResponse { analysis: FoundItemAnalysis; found_location: string; notes: string | null; summary: string; model: string }
 export interface ConfirmedItem { item_id: string; status: "available"; summary: string; found_location: string; found_at: string; storage_size: StorageSize; slot_code: string; section: string; slot_status: "reserved" | "occupied"; placement_status: "reserved" | "placed" }
-export interface StorageSlot { id: string; code: string; size_class: StorageSize; ordinal: number; status: SlotStatus; current_found_item_id: string | null; item_summary: string | null; reserved_at: string | null; occupied_at: string | null; updated_at: string }
+export interface StorageSlot { id: string; code: string; size_class: StorageSize; ordinal: number; status: SlotStatus; is_active: boolean; current_found_item_id: string | null; item_summary: string | null; reserved_at: string | null; occupied_at: string | null; updated_at: string }
 export interface StorageSlotImages { item_id: string; front_image_url: string | null; back_image_url: string | null }
 export interface SlotAvailability { size_class: StorageSize; available: number; reserved: number; occupied: number; can_assign: boolean }
 export interface ClaimDecision { match_candidate_id: string; decision: "accepted" | "rejected"; item_id: string | null; slot_code: string | null; section: string | null }
@@ -111,7 +111,8 @@ export function getSlotAvailability(size: StorageSize) {
   return api<SlotAvailability>(`/api/storage-slots/availability?size_class=${size}`);
 }
 export async function getStorageSlots() {
-  return api<StorageSlot[]>("/api/storage-slots", { headers: await authHeaders() });
+  const rows = await api<StorageSlot[]>("/api/storage-slots", { headers: await authHeaders() });
+  return rows.map((row) => ({ ...row, is_active: row.is_active !== false && isSlotCode(row.code) }));
 }
 export async function getStorageSlotImages(itemId: string) {
   return api<StorageSlotImages>(`/api/storage-slots/items/${encodeURIComponent(itemId)}/images`, { headers: await authHeaders() });

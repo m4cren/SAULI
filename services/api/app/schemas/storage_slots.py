@@ -17,6 +17,7 @@ class StorageSlotResponse(StrictModel):
     size_class: SizeClass
     ordinal: int
     status: SlotStatus
+    is_active: bool
     current_found_item_id: UUID | None
     item_summary: str | None
     reserved_at: AwareDatetime | None

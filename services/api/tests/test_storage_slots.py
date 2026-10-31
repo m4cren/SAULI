@@ -21,9 +21,10 @@ from app.services.storage_slots import availability
 
 
 MIGRATION = Path(__file__).resolve().parents[3] / "supabase/migrations/202610110001_sauli_storage_slots.sql"
+FINAL_LAYOUT_MIGRATION = Path(__file__).resolve().parents[3] / "supabase/migrations/202610310001_sauli_twelve_active_storage_slots.sql"
 
 
-def test_migration_defines_exact_layout_and_atomic_transitions():
+def test_initial_migration_history_keeps_atomic_transitions():
     sql = MIGRATION.read_text(encoding="utf-8").lower()
     assert "generate_series(1,10)" in sql and "generate_series(1,5)" in sql
     assert "on conflict (code) do nothing" in sql
@@ -35,9 +36,23 @@ def test_migration_defines_exact_layout_and_atomic_transitions():
     assert "simulated_item_placed','web_simulation'" in sql
 
 
+def test_final_layout_migration_retires_old_slots_without_deleting_history():
+    sql = FINAL_LAYOUT_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "generate_series(1,8)" in sql and "generate_series(1,4)" in sql
+    assert "code in ('p-09','p-10','m-05')" in sql
+    assert "set is_active = false" in sql
+    assert "status = 'reserved'" in sql and "retired_slot_has_pending_reservation" in sql
+    assert "status = 'available' and is_active" in sql
+    assert "order by ordinal limit 1 for update skip locked" in sql
+    assert "delete from public.storage_slots" not in sql
+
+
 def test_availability_is_size_specific_and_counts_reserved_separately():
-    rows = [{"size_class": "pocket", "status": "reserved"}, {"size_class": "pocket", "status": "occupied"},
-            {"size_class": "medium", "status": "available"}]
+    rows = [{"code": "P-01", "size_class": "pocket", "status": "reserved"},
+            {"code": "P-02", "size_class": "pocket", "status": "occupied"},
+            {"code": "M-01", "size_class": "medium", "status": "available"},
+            {"code": "P-09", "size_class": "pocket", "status": "available", "is_active": False},
+            {"code": "M-05", "size_class": "medium", "status": "occupied", "is_active": False}]
     pocket = availability(rows, "pocket")
     medium = availability(rows, "medium")
     assert (pocket.available, pocket.reserved, pocket.occupied, pocket.can_assign) == (0, 1, 1, False)
@@ -179,6 +194,8 @@ def test_admin_slot_list_requires_role_and_returns_all_positions():
         response = client.get("/api/storage-slots")
     assert response.status_code == 200
     assert [slot["code"] for slot in response.json()] == codes
+    assert sum(slot["is_active"] for slot in response.json()) == 12
+    assert {slot["code"] for slot in response.json() if not slot["is_active"]} == {"P-09", "P-10", "M-05"}
 
 
 def test_admin_item_photos_require_role_and_are_signed_on_demand():

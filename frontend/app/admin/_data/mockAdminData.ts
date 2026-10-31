@@ -17,11 +17,11 @@ export function hasPrototypeFootage(camera: string, date: string, start: string)
 }
 
 export const hardwareItems = [
-  { id: "pocket-door", name: "Pocket-size Door", description: "Main access door for compartments P-01 through P-10.", icon: "door" },
-  { id: "medium-door", name: "Medium-size Door", description: "Main access door for compartments M-01 through M-05.", icon: "door" },
+  { id: "pocket-door", name: "Pocket-size Door", description: "Main access door for the pocket-size compartments.", icon: "door" },
+  { id: "medium-door", name: "Medium-size Door", description: "Main access door for the medium-size compartments.", icon: "door" },
   { id: "pi", name: "Raspberry Pi", description: "Kiosk gateway, interface, QR scanner, and main hardware controller. Controls both locks and door reed switches.", icon: "computer" },
-  { id: "esp-pocket", name: "ESP32-S3", description: "Monitors load cells for P-01 through P-10.", icon: "chip" },
-  { id: "esp-medium", name: "ESP32-S3", description: "Monitors load cells for M-01 through M-05.", icon: "chip" },
+  { id: "esp-pocket", name: "ESP32-S3", description: "Planned load-cell monitoring for pocket-size compartments.", icon: "chip" },
+  { id: "esp-medium", name: "ESP32-S3", description: "Planned load-cell monitoring for medium-size compartments.", icon: "chip" },
   { id: "camera", name: "Raspberry Pi Camera", description: "Captures found-item images and scans retrieval QR codes.", icon: "camera" },
   { id: "display", name: "Touch Display", description: "Seven-inch kiosk touchscreen interface.", icon: "display" },
   { id: "light", name: "Scanning LED Light", description: "Provides consistent lighting during item-image capture.", icon: "light" },

@@ -33,11 +33,11 @@ test("camera capture rejects missing frames and files beyond the existing upload
   await assert.rejects(captureVideoFrame({ videoWidth: 640, videoHeight: 480 }, canvas, "front"), /exceeds 10 MiB/);
 });
 
-test("camera cleanup stops every track and permission errors offer upload", () => {
+test("camera cleanup stops every track and permission errors explain retry", () => {
   const stopped = [];
   stopCameraStream({ getTracks: () => [{ stop: () => stopped.push("video") }, { stop: () => stopped.push("audio") }] });
   assert.deepEqual(stopped, ["video", "audio"]);
-  assert.match(cameraErrorMessage(Object.assign(new Error(), { name: "NotAllowedError" })), /Camera access was not allowed.*upload the images instead/);
+  assert.match(cameraErrorMessage(Object.assign(new Error(), { name: "NotAllowedError" })), /Camera access was not allowed.*try again/);
   assert.match(cameraErrorMessage(Object.assign(new Error(), { name: "NotFoundError" })), /No camera was found/);
   assert.match(cameraErrorMessage(Object.assign(new Error(), { name: "NotReadableError" })), /already in use/);
 });

@@ -3,7 +3,6 @@
 import { useEffect, useRef } from "react";
 import Button from "@/app/components/Button";
 import Icon from "@/app/components/Icon";
-import { assignedCompartment, wrongCompartment } from "../_data/mockKioskData";
 import { useKiosk } from "../_hooks/useKioskFlow";
 import DesktopTestControls from "./DesktopTestControls";
 
@@ -32,6 +31,8 @@ export default function StatusModal({ type }: { type: "cancel" | "wrongPlacement
   const cancel = type === "cancel";
   const wrongPlacement = type === "wrongPlacement";
   const intended = kiosk.state.validatedRetrieval;
+  const assignedCompartment = kiosk.state.assignment?.slot_code ?? "the assigned position";
+  const wrongCompartment = kiosk.slots.find((slot) => slot.id !== assignedCompartment)?.id ?? "another position";
   return <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 p-4">
     <div ref={modalRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="kiosk-modal-title" aria-describedby="kiosk-modal-description" className="w-full max-w-[600px] rounded-xl bg-white p-5 text-center shadow-xl sm:p-8">
       <span className={`mx-auto flex size-16 items-center justify-center rounded-full ${cancel ? "bg-[#ffedcc] text-[#a26b13]" : "bg-[#f4e1e1] text-red-600"}`}><Icon name={cancel ? "warning" : "close"} size={36} /></span>
@@ -44,9 +45,9 @@ export default function StatusModal({ type }: { type: "cancel" | "wrongPlacement
         </div>
         <div className="mt-4 rounded-lg border border-red-300 bg-[#ffe4e4] p-4 text-left text-sm text-red-700"><strong>Return the item to its original position.</strong><p className="mt-1">The door remains in the simulated open state. Your item remains in {intended?.slot_code ?? "its assigned position"}.</p></div>
         <p role="status" className="mt-4 flex items-center justify-center gap-2 text-xs text-[#52676a]"><span aria-hidden="true" className="size-4 animate-spin rounded-full border-2 border-[#c9dede] border-t-[#0b474f]" />Waiting for item return…</p>
-        <DesktopTestControls inModal />
+        {process.env.NODE_ENV === "development" && <DesktopTestControls inModal />}
       </>}
-      {wrongPlacement && <><p className="mt-5 text-sm">Remove it from {wrongCompartment}, then place it in {assignedCompartment}.</p><DesktopTestControls inModal /></>}
+      {wrongPlacement && <><p className="mt-5 text-sm">Remove it from {wrongCompartment}, then place it in {assignedCompartment}.</p>{process.env.NODE_ENV === "development" && <DesktopTestControls inModal />}</>}
       {cancel && <div className="mt-7 flex flex-col gap-2 sm:flex-row"><Button type="button" variant="outline" onClick={kiosk.stay} className="flex-1">Keep working</Button><Button type="button" onClick={kiosk.reset} className="flex-1">Discard and return home</Button></div>}
     </div>
   </div>;

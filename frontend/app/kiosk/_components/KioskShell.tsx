@@ -2,6 +2,9 @@
 
 import { useKiosk } from "../_hooks/useKioskFlow";
 import CompletionScreen from "./CompletionScreen";
+import CircuitBackground from "./CircuitBackground";
+import CaptureRejectionScreen from "./CaptureRejectionScreen";
+import DifferentItemScreen from "./DifferentItemScreen";
 import FoundLocationForm from "./FoundLocationForm";
 import HomeActions from "./HomeActions";
 import IdentificationReview from "./IdentificationReview";
@@ -12,6 +15,7 @@ import KioskHeader from "./KioskHeader";
 import PlacementScreen from "./PlacementScreen";
 import ProcessingScreen from "./ProcessingScreen";
 import QrResultScreen from "./QrResultScreen";
+import ReadyToStoreScreen from "./ReadyToStoreScreen";
 import QrUploadPanel from "./QrUploadPanel";
 import StatusModal from "./StatusModal";
 
@@ -26,8 +30,13 @@ export default function KioskShell() {
       case "captureBack": content = <ItemCaptureStep key="back" side={2} />; break;
       case "foundLocation": content = <FoundLocationForm />; break;
       case "identifying": content = <ProcessingScreen kind="identify" />; break;
+      case "differentItem": content = <DifferentItemScreen />; break;
+      case "noItem": content = <CaptureRejectionScreen reason="noItem" />; break;
+      case "hazardousItem": content = <CaptureRejectionScreen reason="hazardousItem" />; break;
+      case "looseMoney": content = <CaptureRejectionScreen reason="looseMoney" />; break;
       case "summary": content = <IdentificationSummary />; break;
       case "review": content = <IdentificationReview />; break;
+      case "readyToStore": content = <ReadyToStoreScreen />; break;
       case "placement": content = <PlacementScreen />; break;
       case "placementCorrect": content = <PlacementScreen />; break;
       case "stored": content = <CompletionScreen kind="stored" />; break;
@@ -43,8 +52,5 @@ export default function KioskShell() {
       case "retrieved": content = <CompletionScreen kind="retrieved" />; break;
     }
   }
-  const compactReview = screen.mode === "found" && screen.step === "review";
-  const compactSummary = screen.mode === "found" && screen.step === "summary";
-  const compactCapture = screen.mode === "found" && (screen.step === "captureFront" || screen.step === "captureBack" || screen.step === "foundLocation");
-  return <div className="mx-auto min-h-dvh w-full max-w-[1280px] bg-white font-sans text-[#092a2f] shadow-[0_0_25px_rgba(0,0,0,0.06)]"><div inert={Boolean(modal)} aria-hidden={Boolean(modal)} className="min-h-dvh">{screen.mode === "home" ? content : <><KioskHeader /><main className={`mx-auto w-full max-w-[1180px] px-5 sm:px-10 ${compactReview ? "pb-0 pt-6" : compactCapture ? "pb-5 pt-5" : compactSummary ? "pb-0 pt-9" : "pb-8 pt-9"}`}>{content}</main></>}</div>{modal && <StatusModal type={modal} />}</div>;
+  return <div className="kiosk-shell font-sans"><CircuitBackground /><div inert={Boolean(modal)} aria-hidden={Boolean(modal)} className="min-h-dvh">{screen.mode === "home" ? content : <><KioskHeader /><main className="kiosk-main">{content}</main></>}</div>{modal && <StatusModal type={modal} />}</div>;
 }
