@@ -7,6 +7,8 @@
 -- storage_slots rows, including the three retired positions and their IDs.
 -- After the 12-slot migration, only P-01..P-08 and M-01..M-04 stay active.
 -- Retrieval sessions, events, completed logs, and resolved reports are also cleared.
+-- The EmailJS dispatch clock is reset so a new test run starts with no
+-- delay inherited from a previous notification attempt.
 
 begin;
 set local lock_timeout = '10s';
@@ -28,7 +30,8 @@ truncate table public.retrieval_events,
   public.missing_reports,
   public.storage_slot_events,
   public.match_candidates,
-  public.search_requests restart identity;
+  public.search_requests,
+  public.sauli_email_dispatch_clock restart identity;
 
 -- Release every position before deleting its referenced found item.
 update public.storage_slots
@@ -42,7 +45,7 @@ where status <> 'available'
    or occupied_at is not null;
 
 delete from public.found_items;
-update public.sauli_email_dispatch_clock set next_allowed_at = now() where id = 1;
+insert into public.sauli_email_dispatch_clock (id, next_allowed_at) values (1, now());
 
 -- Abort the transaction if any listed table still contains records.
 do $$
@@ -57,6 +60,8 @@ begin
     or exists (select 1 from public.missing_reports)
     or exists (select 1 from public.matching_jobs)
     or exists (select 1 from public.email_notifications)
+    or (select count(*) from public.sauli_email_dispatch_clock) <> 1
+    or exists (select 1 from public.sauli_email_dispatch_clock where id <> 1 or next_allowed_at > now())
     or exists (
       select 1 from public.storage_slots
       where status <> 'available'

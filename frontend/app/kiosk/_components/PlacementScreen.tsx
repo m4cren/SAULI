@@ -19,7 +19,7 @@ export default function PlacementScreen() {
         <ol className="mt-3 grid gap-1 text-sm"><li><strong>1.</strong> Open the {section.toLowerCase()} door.</li><li><strong>2.</strong> Place the item in {assignment.slot_code}.</li><li><strong>3.</strong> Close the door carefully.</li></ol>
         <div className="mt-auto"><SensorStatusCard title="Placement sensor active" detail="Waiting for the item to be placed" />
           {kiosk.state.error && <p role="alert" className="mt-2 text-sm text-red-700">{kiosk.state.error}</p>}
-          {process.env.NODE_ENV === "development" && <details className="mt-2 rounded-lg border border-dashed border-[#a8d6d1] p-2 text-sm"><summary className="cursor-pointer font-semibold">Hardware simulation</summary><Button type="button" disabled={kiosk.busy} onClick={kiosk.simulateCorrectPlacement} className="mt-2 w-full">{kiosk.busy ? "Recording placement…" : "Simulate item placed"}</Button></details>}
+          <details className="mt-2 rounded-lg border border-dashed border-[#a8d6d1] p-2 text-sm"><summary className="cursor-pointer font-semibold">Hardware simulation</summary><div className="mt-2 grid grid-cols-2 gap-2"><Button type="button" disabled={kiosk.busy} onClick={kiosk.simulateCorrectPlacement} className="text-sm">{kiosk.busy ? "Recording placement…" : "Simulate item placed"}</Button><Button type="button" variant="outline" disabled={kiosk.busy} onClick={kiosk.simulateWrongPlacement} className="text-sm">Simulate wrong placement</Button></div></details>
         </div>
       </section></div></>;
 }

@@ -21,7 +21,7 @@ export default function ItemLocationScreen() {
         <ol className="mt-3 grid gap-1 text-sm"><li><strong>1.</strong> Open the {section.toLowerCase()} door.</li><li><strong>2.</strong> Lift only your item from {retrieval.slot_code}.</li><li><strong>3.</strong> Close the door carefully.</li></ol>
         <div className="mt-auto"><SensorStatusCard title="Removal sensor active" detail="Waiting for the item to be lifted" />
           {kiosk.state.error && <p role="alert" className="mt-2 text-sm text-red-700">{kiosk.state.error}</p>}
-          {process.env.NODE_ENV === "development" && <details className="mt-2 rounded-lg border border-dashed border-[#a8d6d1] p-2 text-sm"><summary className="cursor-pointer font-semibold">Hardware simulation</summary><div className="mt-2 grid grid-cols-2 gap-2"><Button type="button" disabled={kiosk.busy} onClick={kiosk.simulateCorrectItem} className="text-sm">Correct item</Button><Button type="button" variant="outline" disabled={kiosk.busy} onClick={kiosk.simulateWrongItem} className="text-sm">Wrong item</Button></div></details>}
+          <details className="mt-2 rounded-lg border border-dashed border-[#a8d6d1] p-2 text-sm"><summary className="cursor-pointer font-semibold">Hardware simulation</summary><div className="mt-2 grid grid-cols-2 gap-2"><Button type="button" disabled={kiosk.busy} onClick={kiosk.simulateCorrectItem} className="text-sm">Correct item</Button><Button type="button" variant="outline" disabled={kiosk.busy} onClick={kiosk.simulateWrongItem} className="text-sm">Wrong item</Button></div></details>
         </div>
       </section></div></>;
 }
