@@ -10,11 +10,11 @@ export default function FacebookLoginButton({ next }: { next: string }) {
       <Button
         type="button"
         variant="plain"
-        className="w-full gap-3 text-sm font-medium"
+        className="facebook-button w-full gap-3 text-[16px] font-semibold"
         disabled={isLoading}
         onClick={() => void signInWithFacebook(next)}
       >
-        <span aria-hidden="true" className="flex size-5 items-end justify-center rounded-full bg-[#1877f2] text-lg font-bold leading-none text-white">f</span>
+        <span aria-hidden="true" className="flex size-7 items-end justify-center rounded-full bg-white text-[24px] font-bold leading-none text-[#0866ff]">f</span>
         {isLoading ? "Connecting…" : "Continue with Facebook"}
       </Button>
       {error && <p role="alert" className="text-sm text-red-700">{error}</p>}

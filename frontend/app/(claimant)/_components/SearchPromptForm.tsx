@@ -37,16 +37,16 @@ export default function SearchPromptForm() {
   }
 
   return (
-    <form onSubmit={submit} className="mt-[44px] rounded-[12px] bg-white p-[15px] shadow-[0_3px_4px_rgba(0,0,0,0.15)]">
-      <label htmlFor="lost-description" className="block text-[16px] font-semibold tracking-[0.04em]">Ask SAULI</label>
-      <textarea id="lost-description" maxLength={501} value={state.searchDraft.description} onChange={(event) => { setDraft({ ...state.searchDraft, description: event.target.value }); setError(null); }} placeholder="Example: Black wallet with a small silver logo, dropped 12 o’clock past August 21" className="mt-1 h-[154px] w-full resize-none rounded-md border-0 bg-transparent text-[17px] leading-[1.35] text-[#333] outline-none placeholder:text-[#8d8d8d] focus-visible:ring-2 focus-visible:ring-[var(--sauli-brand)]" />
-      {preview && <div className="mb-3 flex items-center gap-2 rounded-md border border-[var(--sauli-border)] p-2"><span role="img" aria-label="Selected item preview" className="size-12 shrink-0 rounded bg-cover bg-center" style={{ backgroundImage: `url(${JSON.stringify(preview.url)})` }} /><span className="min-w-0 truncate text-xs">{preview.name}</span></div>}
-      <div className="mb-2 flex items-center justify-between">
-        <label className="inline-flex min-h-11 cursor-pointer items-center rounded-md border border-[var(--sauli-border)] px-3 text-xs tracking-[0.08em] focus-within:outline-2 focus-within:outline-[var(--sauli-brand)]">+ Photo<input type="file" accept="image/*" onChange={onPhotoChange} className="sr-only" /></label>
-        <span aria-live="polite" className="text-[11px] text-[#8e8e8e]">{state.searchDraft.description.length}/501</span>
+    <form onSubmit={submit} className="client-card p-4">
+      <label htmlFor="lost-description" className="mb-4 flex items-center gap-2 text-[19px] font-bold text-[#092b35]"><span aria-hidden="true" className="text-[24px] leading-none text-[#299f93]">✦</span>Ask SAULI</label>
+      <textarea id="lost-description" maxLength={501} value={state.searchDraft.description} onChange={(event) => { setDraft({ ...state.searchDraft, description: event.target.value }); setError(null); }} placeholder="Example: Black wallet with a small silver logo, last seen near the library on August 21." className="client-field min-h-[172px] resize-y bg-[#f1faf9] p-4 leading-[1.45]" />
+      {preview && <div className="mb-3 mt-3 flex items-center gap-2 rounded-xl border border-[#d7edeb] p-2"><span role="img" aria-label="Selected item preview" className="size-12 shrink-0 rounded-lg bg-cover bg-center" style={{ backgroundImage: `url(${JSON.stringify(preview.url)})` }} /><span className="min-w-0 truncate text-xs">{preview.name}</span></div>}
+      <div className="mb-4 mt-3 flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2"><label className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-[#c9dcdf] bg-white px-3 text-sm font-semibold text-[#0b474f] focus-within:outline-2 focus-within:outline-[#0b474f]"><Icon name="camera" size={18} />Add photo<input type="file" accept="image/*" onChange={onPhotoChange} className="sr-only" /></label><span className="text-xs text-[#74858d]">Optional</span></div>
+        <span aria-live="polite" className="shrink-0 text-xs text-[#74858d]">{state.searchDraft.description.length}/501</span>
       </div>
       {error && <p role="alert" className="mb-2 text-sm text-red-700">{error}</p>}
-      <Button type="submit" className="w-full gap-2">Find my lost item <Icon name="search" size={22} /></Button>
+      <Button type="submit" className="client-primary-button w-full gap-2">Find my lost item <Icon name="search" size={22} /></Button>
     </form>
   );
 }

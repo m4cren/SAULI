@@ -12,7 +12,7 @@ export default function AppHeader() {
   const avatar = user ? avatarUrl(user) : null;
 
   return (
-    <header className="sticky top-0 z-20 flex h-[74px] shrink-0 items-center justify-between bg-white px-[21px] shadow-[0_2px_4px_rgba(0,0,0,0.16)]">
+    <header className="client-header sticky top-0 z-20 flex h-[74px] shrink-0 items-center justify-between bg-white px-[21px] shadow-[0_2px_4px_rgba(0,0,0,0.16)]">
       <BrandMark />
       <div className="relative">
         <button type="button" aria-label="Account menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)} className="flex size-11 items-center justify-center rounded-full border border-[#e1e1e1] bg-white p-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--sauli-brand)]">

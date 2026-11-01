@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import ClientHero from "@/app/components/ClientHero";
 import Icon from "@/app/components/Icon";
 import { useClaimant } from "@/hooks/useClaimant";
 import { formatDateTime } from "@/libs/claimant/format";
@@ -9,26 +10,39 @@ import useRetrievalPolling from "../../_hooks/useRetrievalPolling";
 export default function RetrievedPage() {
   const { state } = useClaimant();
   const session = state.retrievalSession;
-  const syncError = useRetrievalPolling(session?.status === "completed" && session.slotCode ? null : session?.id ?? null);
+  const receiptComplete = session?.status === "completed" && !!session.slotCode && !!session.completedAt && !!session.retriever;
+  const syncError = useRetrievalPolling(receiptComplete ? null : session?.id ?? null);
 
-  if (session?.status !== "completed") return <main className="sauli-page" role="status">Opening your retrieval receipt…</main>;
+  if (session?.status !== "completed") return <main className="client-content" role="status">Opening your retrieval receipt…</main>;
 
-  return <main className="sauli-page flex min-h-[calc(100dvh-170px)] flex-col pb-7 text-center">
-    <div className="mx-auto mt-3 flex size-14 items-center justify-center rounded-full bg-[#d5eae7] text-[#0b7776]"><Icon name="check" size={34} /></div>
-    <p className="sauli-eyebrow mt-3">Retrieval recorded</p>
-    <h1 className="sauli-title mt-2">Item retrieved</h1>
-    <p className="sauli-subtitle mt-2">Your item was marked as retrieved at the SAULI kiosk.</p>
-    <dl className="sauli-card mt-6 overflow-hidden text-left text-sm">
-      <div className="flex justify-between gap-4 border-b border-[#ddd] px-3 py-3"><dt>Item</dt><dd className="text-right font-semibold">{session.itemSummary}</dd></div>
-      <div className="flex justify-between gap-4 border-b border-[#ddd] px-3 py-3"><dt>Compartment</dt><dd className="font-semibold">{session.slotCode ?? "Loading…"}</dd></div>
-      <div className="flex justify-between gap-4 border-b border-[#ddd] px-3 py-3"><dt>Retriever</dt><dd className="text-right font-semibold">{session.retriever ?? "Your account"}</dd></div>
-      <div className="flex justify-between gap-4 px-3 py-3"><dt>Recorded</dt><dd className="text-right font-semibold">{session.completedAt ? formatDateTime(session.completedAt) : "Loading…"}</dd></div>
-    </dl>
-    <div className="sauli-card mt-4 flex gap-3 p-3 text-left text-xs"><span aria-hidden="true" className="mt-0.5 size-4 shrink-0 rounded-full bg-[#93d3cd]" /><p><strong>Retrieval log saved.</strong><br />The completed transaction is in your retrieval history.</p></div>
-    {syncError && <p role="status" className="mt-3 text-sm text-amber-800">Reconnecting to the kiosk status…</p>}
-    <div className="mt-auto grid gap-2 pt-8">
-      <Link href="/history" className="sauli-gradient flex min-h-12 items-center justify-center rounded-lg px-4 py-3 font-semibold text-white">View retrieval history</Link>
-      <Link href="/" className="flex min-h-12 items-center justify-center rounded-lg border border-[#0b474f] px-4 py-3 font-semibold text-[#0b474f]">Return home</Link>
-    </div>
-  </main>;
+  const subtitle = session.slotCode
+    ? `The sensor detected that ${session.itemSummary} was lifted from compartment ${session.slotCode}.`
+    : "The station recorded that your item was retrieved.";
+
+  return <>
+    <ClientHero
+      align="center"
+      eyebrow="WEIGHT CHANGE DETECTED"
+      title="Item retrieved"
+      subtitle={subtitle}
+      icon={<div className="mx-auto flex size-20 items-center justify-center rounded-full bg-[#dff9f4] text-[#0d9d98] shadow-[0_0_24px_rgba(31,214,195,0.45)]"><Icon name="check" size={48} /></div>}
+    />
+    <main className="client-content client-overlap space-y-4 pb-8">
+      <dl className="client-card overflow-hidden p-1 shadow-[0_12px_28px_rgba(5,81,86,0.08)]">
+        <div className="flex min-w-0 justify-between gap-4 border-b border-[#deebed] px-4 py-4"><dt className="shrink-0 text-[#657285]">Item</dt><dd className="min-w-0 break-words text-right font-bold text-[#12243a]">{session.itemSummary}</dd></div>
+        <div className="flex min-w-0 justify-between gap-4 border-b border-[#deebed] px-4 py-4"><dt className="shrink-0 text-[#657285]">Compartment</dt><dd className="min-w-0 break-words text-right font-bold text-[#12243a]">{session.slotCode ?? "Updating…"}</dd></div>
+        <div className="flex min-w-0 justify-between gap-4 border-b border-[#deebed] px-4 py-4"><dt className="shrink-0 text-[#657285]">Retriever</dt><dd className="min-w-0 break-words text-right font-bold text-[#12243a]">{session.retriever ?? "Your account"}</dd></div>
+        <div className="flex min-w-0 justify-between gap-4 px-4 py-4"><dt className="shrink-0 text-[#657285]">Recorded</dt><dd className="min-w-0 break-words text-right font-bold text-[#12243a]">{session.completedAt ? formatDateTime(session.completedAt) : "Updating…"}</dd></div>
+      </dl>
+      <div className="client-info-card flex items-center gap-3 p-4 text-[#145966]">
+        <span aria-hidden="true" className="size-5 shrink-0 rounded-full border-[5px] border-[#bdebe7] bg-[#05a798]" />
+        <div><p className="font-bold">Retrieval log saved</p><p className="text-sm text-[#657285]">The transaction is now included in the audit history.</p></div>
+      </div>
+      {syncError && <p role="status" className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">Reconnecting to the kiosk status…</p>}
+      <div className="grid gap-3 pt-4">
+        <Link href="/history" className="client-primary-button flex min-h-12 items-center justify-center">View retrieval history</Link>
+        <Link href="/" className="client-secondary-button flex min-h-12 items-center justify-center">Return home</Link>
+      </div>
+    </main>
+  </>;
 }
