@@ -1,11 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { useAuth } from "@/hooks/useAuth";
 import BrandFrame from "@/app/components/BrandFrame";
 import FacebookLoginButton from "./FacebookLoginButton";
-import { isFacebookClaimant } from "@/libs/auth/claimant";
 
 export default function LoginPage({
   next,
@@ -14,12 +10,6 @@ export default function LoginPage({
   next: string;
   message?: string;
 }) {
-  const { user } = useAuth();
-  const router = useRouter();
-  useEffect(() => {
-    if (isFacebookClaimant(user)) router.replace(next);
-  }, [user, next, router]);
-
   return (
     <main className="client-login-shell mx-auto flex min-h-dvh w-full max-w-[428px] flex-col overflow-x-clip bg-white shadow-[0_0_35px_rgba(0,0,0,0.08)]">
       <section className="client-hero client-login-hero" aria-label="SAULI">
