@@ -71,8 +71,6 @@ test("explicit analysis rejection does not create an assignment", () => {
 test("wrong placement blocks correct placement until removal", () => {
   let state = { ...initialKioskState, screen: { mode: "found", step: "summary" }, review };
   state = move(state, { type: "FOUND_CONFIRMED", assignment: { item_id: "item-1", slot_code: "P-07", section: "pocket" } });
-  assert.equal(state.screen.step, "readyToStore");
-  state = move(state, { type: "UNLOCK_DOOR" });
   assert.equal(state.screen.step, "placement");
   state = move(state, { type: "WRONG_PLACEMENT" });
   assert.equal(state.modal, "wrongPlacement");

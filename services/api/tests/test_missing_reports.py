@@ -524,7 +524,9 @@ def test_emailjs_payload_success_retry_and_permanent_failure():
     }
     assert params["to_email"] == "owner@example.com"
     assert params["found_date"] == "October 12, 2026 at 8:00 AM"
-    assert params["match_url"].startswith("http://localhost:3000/missing/reports/")
+    assert params["match_url"].startswith(
+        "https://sauli-system.vercel.app/missing/reports/"
+    )
     assert "PRIVATE SERIAL" not in str(params) and "P-" not in str(params)
     assert "private" not in str(repo.final)
     repo = EmailRepo()
@@ -587,6 +589,7 @@ def test_invalid_recipient_and_localhost_production_url_never_send():
         emailjs_service_id="service",
         emailjs_template_id="template",
         emailjs_public_key="public",
+        frontend_base_url="http://localhost:3000",
         environment="production",
         retrieval_token_pepper="x" * 48,
     )

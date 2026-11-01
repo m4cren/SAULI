@@ -253,7 +253,6 @@ function useKioskFlow() {
     simulatePlacementRemoved: () => dispatch({ type: "WRONG_PLACEMENT_REMOVED" }),
     simulateCorrectPlacement,
     simulateDoorClosed: () => dispatch({ type: "DOOR_CLOSED" }),
-    unlockDoor: () => dispatch({ type: "UNLOCK_DOOR" }),
     showItemLocation: () => dispatch({ type: "SHOW_ITEM_LOCATION" }),
     simulateWrongItem: () => void simulateRetrieval("wrong-item"),
     simulateItemReturned: () => void simulateRetrieval("item-returned"),

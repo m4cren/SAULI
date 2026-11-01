@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:9b-q8_0"
     ollama_timeout_seconds: float = Field(default=180, gt=0)
-    frontend_origin: str = "http://localhost:3000"
+    frontend_origin: str = "https://sauli-system.vercel.app"
     max_image_bytes: int = Field(default=10_485_760, ge=1)
     max_image_pixels: int = Field(default=20_000_000, ge=1)
     retrieval_qr_ttl_minutes: int = Field(default=180, ge=1, le=1440)
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     emailjs_private_key: str | None = Field(default=None, repr=False)
     emailjs_timeout_seconds: float = Field(default=10, gt=0, le=60)
     emailjs_max_retries: int = Field(default=3, ge=1, le=10)
-    frontend_base_url: str = "http://localhost:3000"
+    frontend_base_url: str = "https://sauli-system.vercel.app"
     match_notification_min_score: float = Field(default=65, ge=0, le=100)
     environment: str = "development"
 
@@ -87,7 +87,10 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> tuple[str, ...]:
-        return (self.frontend_origin,)
+        origins = [self.frontend_origin]
+        if self.environment.lower() == "development":
+            origins.extend(("http://localhost:3000", "http://127.0.0.1:3000"))
+        return tuple(dict.fromkeys(origins))
 
     @property
     def ollama_base_url(self) -> str:

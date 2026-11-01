@@ -4,7 +4,7 @@ import KioskProgress from "./KioskProgress";
 export default function ProcessingScreen({ kind }: { kind: "identify" | "qr" | "storage" }) {
   const identify = kind === "identify";
   const storage = kind === "storage";
-  return <div className="flex min-h-[calc(100dvh-100px)] items-center justify-center"><section role="status" aria-live="polite" className="kiosk-card flex w-full max-w-[740px] flex-col items-center justify-center gap-3 px-6 py-8 text-center">
+  return <div className="kiosk-center-screen"><section role="status" aria-live="polite" className="kiosk-card flex w-full max-w-[740px] flex-col items-center justify-center gap-3 px-6 py-8 text-center">
     {kind === "qr" && <KioskProgress flow="retrieve" current={2} />}
     <span className="kiosk-electronic mt-4" aria-hidden="true"><Icon name={identify ? "camera" : storage ? "check" : "search"} size={47} /></span>
     <span className="kiosk-pill mt-5">{identify ? "TWO SIDES RECEIVED" : storage ? "ITEM DETAILS CONFIRMED" : "CHECKING AUTHORIZATION"}</span>

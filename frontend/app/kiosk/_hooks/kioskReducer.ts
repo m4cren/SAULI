@@ -39,8 +39,7 @@ export type KioskAction =
   | { type: "SAVE_REVIEW" }
   | { type: "RETAKE_PHOTOS" }
   | { type: "RETAKE_SIDE"; side: "front" | "back" }
-  | { type: "FOUND_CONFIRMED"; assignment?: ConfirmedItem }
-  | { type: "UNLOCK_DOOR" }
+  | { type: "FOUND_CONFIRMED"; assignment: ConfirmedItem }
   | { type: "PLACEMENT_SUCCEEDED"; assignment: ConfirmedItem }
   | { type: "WRONG_PLACEMENT" }
   | { type: "WRONG_PLACEMENT_REMOVED" }
@@ -88,9 +87,7 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
       ? { ...state, screen: { mode: "found", step: action.side === "front" ? "captureFront" : "captureBack" },
         images: { ...state.images, [action.side]: null }, storageSize: null, error: null } : state;
     case "FOUND_CONFIRMED": return screen.mode === "found" && screen.step === "summary"
-      ? { ...state, screen: { mode: "found", step: "readyToStore" }, assignment: action.assignment ?? null, images: { ...state.images, front: null, back: null }, error: null } : state;
-    case "UNLOCK_DOOR": return screen.mode === "found" && screen.step === "readyToStore" && state.assignment
-      ? { ...state, screen: { mode: "found", step: "placement" } } : state;
+      ? { ...state, screen: { mode: "found", step: "placement" }, assignment: action.assignment, images: { ...state.images, front: null, back: null }, error: null } : state;
     case "PLACEMENT_SUCCEEDED": return screen.mode === "found" && screen.step === "placement"
       ? { ...state, screen: { mode: "found", step: "stored" }, assignment: action.assignment, error: null } : state;
     case "WRONG_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, modal: "wrongPlacement" } : state;

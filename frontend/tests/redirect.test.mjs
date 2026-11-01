@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { safeLocalPath } from "../libs/auth/redirect.ts";
+import { oauthCallbackUrl, safeLocalPath } from "../libs/auth/redirect.ts";
 import { isFacebookClaimant } from "../libs/auth/claimant.ts";
 
 test("keeps application paths", () => {
   assert.equal(safeLocalPath("/"), "/");
   assert.equal(safeLocalPath("/home?tab=recent"), "/home?tab=recent");
+});
+
+test("Facebook sign-in uses the exact application callback on the deployed origin", () => {
+  assert.equal(oauthCallbackUrl("https://sauli-system.vercel.app"), "https://sauli-system.vercel.app/auth/callback");
+  assert.equal(oauthCallbackUrl("http://localhost:3000"), "http://localhost:3000/auth/callback");
 });
 
 test("rejects external and protocol-relative destinations", () => {

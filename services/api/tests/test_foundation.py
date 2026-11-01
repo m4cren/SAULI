@@ -41,6 +41,66 @@ def test_legacy_ollama_timeout_is_raised_for_vision():
     assert Settings(ollama_timeout_seconds=240).ollama_timeout_seconds == 240
 
 
+def test_deployed_frontend_origin_is_normalized_for_cors_and_links():
+    settings = Settings(
+        frontend_origin="https://sauli-system.vercel.app/",
+        frontend_base_url="https://sauli-system.vercel.app/",
+        environment="production",
+        retrieval_token_pepper="a" * 32,
+    )
+    assert settings.cors_origins == ("https://sauli-system.vercel.app",)
+    assert settings.frontend_base_url == "https://sauli-system.vercel.app"
+    with TestClient(create_app(settings)) as client:
+        response = client.options(
+            "/api/storage-slots",
+            headers={
+                "Origin": "https://sauli-system.vercel.app",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+    assert response.headers["access-control-allow-origin"] == (
+        "https://sauli-system.vercel.app"
+    )
+
+
+def test_local_frontend_can_preflight_found_item_analysis_in_development():
+    settings = Settings(frontend_origin="https://sauli-system.vercel.app")
+    assert settings.cors_origins == (
+        "https://sauli-system.vercel.app",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
+    with TestClient(create_app(settings)) as client:
+        for origin in ("http://localhost:3000", "http://127.0.0.1:3000"):
+            response = client.options(
+                "/api/found-items/analyze",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+            assert response.status_code == 200
+            assert response.headers["access-control-allow-origin"] == origin
+
+
+def test_production_cors_does_not_allow_localhost():
+    settings = Settings(
+        environment="production",
+        retrieval_token_pepper="a" * 32,
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.options(
+            "/api/found-items/analyze",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+
+
 def test_health_starts_without_supabase_or_ollama():
     with TestClient(create_app(Settings())) as client:
         health = client.get("/health").json()

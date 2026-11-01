@@ -14,15 +14,15 @@ const nodes = [
   [158, 744], [196, 802], [204, 880], [170, 894],
 ] as const;
 
-export default function CircuitBackground() {
+export default function CircuitBackground({ showTop = true }: { showTop?: boolean }) {
   return <div className="kiosk-circuit" aria-hidden="true">
     <svg viewBox="0 0 1440 900" preserveAspectRatio="none" className="h-full w-full" fill="none" xmlns="http://www.w3.org/2000/svg">
       {[false, true].map((mirror) => <g key={mirror ? "right" : "left"} transform={mirror ? "translate(1440 0) scale(-1 1)" : undefined}>
         <g stroke="#4cbdb8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke">
-          {(mirror ? tracks : [...tracks.slice(0, 3), ...tracks.slice(4)]).map((path) => <path key={path} d={path} />)}
+          {(showTop ? mirror ? tracks : [...tracks.slice(0, 3), ...tracks.slice(4)] : tracks.slice(4)).map((path) => <path key={path} d={path} />)}
         </g>
         <g fill="#60cfc8" stroke="#d8f4f0" strokeWidth="3" vectorEffect="non-scaling-stroke">
-          {(mirror ? nodes : [...nodes.slice(0, 3), ...nodes.slice(4)]).map(([cx, cy]) => <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r="5" />)}
+          {(showTop ? mirror ? nodes : [...nodes.slice(0, 3), ...nodes.slice(4)] : nodes.slice(4)).map(([cx, cy]) => <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r="5" />)}
         </g>
       </g>)}
     </svg>

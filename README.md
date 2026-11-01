@@ -58,7 +58,7 @@ py -3 -m venv services\.venv
 .\services\.venv\Scripts\python.exe -m pip install -r services\requirements.txt
 ```
 
-Fill the local `.env` files with your own project values. Keep Supabase service-role credentials, the retrieval-token pepper, and EmailJS private credentials on the backend. Do not commit real secrets. In separate terminals, start the API and frontend:
+Fill the local `.env` files with your own project values. When running the frontend locally, set `FRONTEND_ORIGIN` and `FRONTEND_BASE_URL` in `services/.env` to `http://localhost:3000`; the example file targets the deployed Vercel frontend. Keep Supabase service-role credentials, the retrieval-token pepper, and EmailJS private credentials on the backend. Do not commit real secrets. In separate terminals, start the API and frontend:
 
 ```powershell
 cd services\api

@@ -12,12 +12,8 @@ export default function FoundLocationForm() {
 
   return <>
     <FlowHeading flow="found" current={1} compact title="Review captured item" subtitle="Check both images and add the last place found before analysis." />
-    <nav aria-label="Image capture progress" className="mb-4 grid grid-cols-3 gap-2 text-center text-xs font-semibold sm:text-sm">
-      {(["Front", "Back", "Review"] as const).map((label, index) => <span key={label} aria-current={index === 2 ? "step" : undefined}
-        className={`rounded-lg border px-2 py-2 ${index === 2 ? "border-[#0B474F] bg-[#d7e6e6] text-[#0B474F]" : "border-[#d5d5d5] text-[#555]"}`}>{index + 1}. {label}</span>)}
-    </nav>
-    <div className="grid gap-5 sm:grid-cols-[minmax(0,1.65fr)_minmax(270px,1fr)]">
-      <div><ImagePairPreview front={front} back={back} /><div className="mt-3 grid grid-cols-2 gap-2">
+    <div className="kiosk-fill-grid grid gap-5 sm:grid-cols-[minmax(0,1.65fr)_minmax(270px,1fr)]">
+      <div className="flex min-w-0 flex-col"><ImagePairPreview front={front} back={back} /><div className="mt-3 grid grid-cols-2 gap-2">
         <Button type="button" variant="outline" onClick={() => kiosk.retakeSide("front")}>Retake front</Button>
         <Button type="button" variant="outline" onClick={() => kiosk.retakeSide("back")}>Retake back</Button>
       </div></div>

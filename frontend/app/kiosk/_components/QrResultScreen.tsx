@@ -13,7 +13,7 @@ export default function QrResultScreen({ valid }: { valid: boolean }) {
   const code = kiosk.state.qrErrorCode;
   const failureTitle = !supported ? "Staff assistance needed" : code === "RETRIEVAL_QR_EXPIRED" ? "This QR has expired" : code === "RETRIEVAL_QR_ALREADY_USED" ? "This QR was already used" : code === "ITEM_NOT_AVAILABLE" || code === "STORAGE_POSITION_MISMATCH" ? "Item unavailable" : "QR code could not be verified";
   const section = retrieval?.section === "medium" ? "Medium-size" : "Pocket-size";
-  return <div className="flex min-h-[calc(100dvh-100px)] items-center justify-center"><section className="kiosk-card flex w-full max-w-[740px] flex-col items-center gap-3 px-6 py-8 text-center">
+  return <div className="kiosk-center-screen"><section className="kiosk-card flex w-full max-w-[740px] flex-col items-center gap-3 px-6 py-8 text-center">
     <span className={`kiosk-electronic ${accepted ? "" : "!border-red-300 !bg-red-50 !text-red-700"}`} aria-hidden="true"><Icon name={accepted ? "check" : "close"} size={46} /></span>
     <span className="kiosk-pill mt-4">{accepted ? "QR CODE VERIFIED" : "QR VERIFICATION FAILED"}</span>
     <h1 className="text-[clamp(26px,3vw,38px)] font-bold">{accepted ? `${section} door is unlocked` : failureTitle}</h1>

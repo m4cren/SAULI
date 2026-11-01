@@ -33,14 +33,14 @@ export default function KioskQrScanner({ onDecoded }: { onDecoded: (payload: str
     return () => { active = false; controls?.stop(); stopMediaTracks(videoElement.srcObject as MediaStream | null); };
   }, []);
 
-  return <div className="kiosk-card min-w-0 overflow-hidden bg-[#0b474f] p-3 text-white">
-    <div className="relative flex h-[min(52vh,390px)] min-h-[245px] items-center justify-center overflow-hidden rounded-xl bg-[#0b343a]">
+  return <div className="kiosk-card kiosk-qr-scanner min-w-0 overflow-hidden p-3">
+    <div className="kiosk-qr-preview relative flex min-h-[245px] items-center justify-center overflow-hidden rounded-xl bg-[#0b343a]">
       <video ref={video} autoPlay muted playsInline aria-label="Webcam QR scanner" className="h-full w-full object-contain" />
       <span className="kiosk-scan-corner tl" aria-hidden="true" /><span className="kiosk-scan-corner tr" aria-hidden="true" /><span className="kiosk-scan-corner bl" aria-hidden="true" /><span className="kiosk-scan-corner br" aria-hidden="true" />
       {scanning && <span className="kiosk-scan-line" aria-hidden="true" />}
-      <p className="absolute left-3 top-3 rounded-full border border-[#53c7b5] bg-[#0b474f]/90 px-3 py-1 text-sm font-bold">{error ? "CAMERA UNAVAILABLE" : scanning ? "● CAMERA READY" : "REQUESTING CAMERA"}</p>
+      <p className="absolute left-3 top-3 rounded-full border border-[#53c7b5] bg-[#0b474f]/90 px-3 py-1 text-sm font-bold text-white">{error ? "CAMERA UNAVAILABLE" : scanning ? "● CAMERA READY" : "REQUESTING CAMERA"}</p>
     </div>
-    <p role="status" className="mt-2 text-center text-sm">{error ? "Camera unavailable" : scanning ? "Keep the entire QR code inside the frame" : "Requesting camera permission…"}</p>
-    {error && <p role="alert" className="mt-2 text-sm text-red-200">{error}</p>}
+    <p role="status" className="mt-2 text-center text-base text-[#0b474f]">{error ? "Camera unavailable" : scanning ? "Keep the entire QR code inside the frame" : "Requesting camera permission…"}</p>
+    {error && <p role="alert" className="mt-2 text-sm text-red-700">{error}</p>}
   </div>;
 }

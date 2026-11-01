@@ -1,5 +1,5 @@
 export type ImageKind = "front" | "back" | "qr";
-export type FoundStep = "captureFront" | "captureBack" | "foundLocation" | "identifying" | "noItem" | "hazardousItem" | "looseMoney" | "differentItem" | "summary" | "review" | "readyToStore" | "placement" | "placementCorrect" | "stored" | "noSlots";
+export type FoundStep = "captureFront" | "captureBack" | "foundLocation" | "identifying" | "noItem" | "hazardousItem" | "looseMoney" | "differentItem" | "summary" | "review" | "placement" | "placementCorrect" | "stored" | "noSlots";
 export type RetrievalStep = "uploadQr" | "verifyingQr" | "qrVerified" | "invalidQr" | "itemLocation" | "retrieved";
 export type KioskScreen = { mode: "home" } | { mode: "found"; step: FoundStep } | { mode: "retrieve"; step: RetrievalStep };
 export type KioskModal = "cancel" | "wrongPlacement" | "wrongItem" | null;

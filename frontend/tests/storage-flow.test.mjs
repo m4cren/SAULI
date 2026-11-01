@@ -29,8 +29,6 @@ test("kiosk uses the assigned API position and requires placement before success
   assert.equal(state.storageSize, "medium");
   state = kioskReducer(state, { type: "FOUND_CONFIRMED", assignment: assigned });
   assert.equal(state.assignment.slot_code, "M-02");
-  assert.equal(state.screen.step, "readyToStore");
-  state = kioskReducer(state, { type: "UNLOCK_DOOR" });
   assert.equal(state.screen.step, "placement");
   state = kioskReducer(state, { type: "PLACEMENT_SUCCEEDED", assignment: { ...assigned, slot_status: "occupied", placement_status: "placed" } });
   assert.equal(state.screen.step, "stored");

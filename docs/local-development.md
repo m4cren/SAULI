@@ -12,7 +12,7 @@ Keep real values in the existing ignored `frontend/.env` and `services/.env` fil
 | --- | --- |
 | `NEXT_PUBLIC_SUPABASE_URL` | Project URL from Supabase Connect, such as `https://<project-ref>.supabase.co` |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Project publishable key from Supabase Connect |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` for local FastAPI; optional because this is the default |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8000` for local FastAPI; set a publicly reachable HTTPS API URL in Vercel |
 
 An existing `NEXT_PUBLIC_SUPABASE_ANON_KEY` is accepted as a legacy fallback when no publishable key is set. Use only a public key in browser code.
 
@@ -22,9 +22,10 @@ An existing `NEXT_PUBLIC_SUPABASE_ANON_KEY` is accepted as a legacy fallback whe
 | --- | --- |
 | `SUPABASE_URL` | Same project URL, using HTTPS |
 | `SUPABASE_PUBLISHABLE_KEY` | Same public project key; `SUPABASE_ANON_KEY` is accepted as a legacy fallback |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` by default, or a private remote URL such as `http://100.x.y.z:11434` |
-| `OLLAMA_TIMEOUT_SECONDS` | Positive number of seconds, default `5` |
-| `CORS_ORIGINS` | Comma-separated exact web origins, default `http://localhost:3000`; add production origins explicitly |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` by default, or a private remote URL such as `http://100.x.y.z:11434` |
+| `OLLAMA_TIMEOUT_SECONDS` | Positive number of seconds, minimum `180` for two-image analysis |
+| `FRONTEND_ORIGIN` | `https://sauli-system.vercel.app` for the deployed app. In development, FastAPI also allows `http://localhost:3000` and `http://127.0.0.1:3000` for local browser testing |
+| `FRONTEND_BASE_URL` | `https://sauli-system.vercel.app` for match-email links; use `http://localhost:3000` for local testing |
 
 The backend starts without the Supabase variables so `/health` remains available. Protected requests return a service error until they are configured. Restart Next.js after changing `NEXT_PUBLIC_` variables.
 
@@ -60,12 +61,12 @@ Open `http://localhost:3000/auth/login`. `http://localhost:8000/health` should r
 
 1. In Supabase, open **Authentication → Providers → Facebook**. Enable it and enter the Meta app ID and app secret there. Keep the Meta app secret in the Supabase dashboard only.
 2. In Meta's **Facebook Login → Settings**, register this **Supabase Auth callback** as a Valid OAuth Redirect URI: `https://<project-ref>.supabase.co/auth/v1/callback`. Copy the exact callback shown by Supabase for your project.
-3. In Supabase **Authentication → URL Configuration**, set the Site URL to `http://localhost:3000` and add this **application callback** to the redirect allowlist: `http://localhost:3000/auth/callback`.
-4. For production, add the deployed application's callback URL to Supabase's redirect allowlist and set an appropriate production Site URL. Keep Meta's redirect URI pointed at the Supabase Auth callback for the corresponding Supabase project.
+3. In Supabase **Authentication → URL Configuration**, set the Site URL to `https://sauli-system.vercel.app` and add this exact **application callback** to the redirect allowlist: `https://sauli-system.vercel.app/auth/callback`. The app stores the post-login destination in a short-lived cookie, so the OAuth `redirectTo` URL has no variable query string.
+4. If you also sign in locally, add `http://localhost:3000/auth/callback` to the same Supabase redirect allowlist. Keep Meta's redirect URI pointed at the Supabase Auth callback for the corresponding Supabase project.
 5. In Meta's Authentication and Account Creation use case, check that `public_profile` and `email` are **Ready for testing**. Facebook may still omit an email for a particular user, so the app treats it as optional.
 6. While the Meta app is in Development mode, use an administrator, developer, or tester account assigned to the app. Testers must accept the invitation. Public sign-in requires moving the app to Live mode and satisfying Meta's current review and permission requirements for the permissions you request.
 
-The callback in **Meta** is the Supabase URL ending in `/auth/v1/callback`. The callback in **Supabase's redirect allowlist** is the Next.js URL ending in `/auth/callback`. Swapping them causes sign-in failures. See [Supabase's Facebook guide](https://supabase.com/docs/guides/auth/social-login/auth-facebook) and [redirect URL guide](https://supabase.com/docs/guides/auth/redirect-urls) for current dashboard steps and Meta development-mode guidance.
+The callback in **Meta** is the Supabase URL ending in `/auth/v1/callback`. The callback in **Supabase's redirect allowlist** is the Next.js URL ending in `/auth/callback`. Swapping them causes sign-in failures. See [Supabase's Facebook guide](https://supabase.com/docs/guides/auth/social-sign-in/auth-facebook) and [redirect URL guide](https://supabase.com/docs/guides/auth/redirect-urls) for current dashboard steps and Meta development-mode guidance.
 
 ## Ollama and protected API checks
 
@@ -75,7 +76,7 @@ Install and start Ollama separately using the [official quickstart](https://docs
 curl.exe http://localhost:11434/api/tags
 ```
 
-For a private remote Ollama server, set `OLLAMA_BASE_URL` in `services/.env` to the server's reachable private address, such as its Tailscale IP and port. Ensure the server listens on that interface and that the API host can reach it. Keep it private and restart FastAPI after changing the variable. The status route uses Ollama's [model-list API](https://docs.ollama.com/api/tags); an empty `models` array is a successful connection when no models are installed.
+For a private remote Ollama server, set `OLLAMA_HOST` in `services/.env` to the server's reachable private address, such as its Tailscale IP and port. Ensure the server listens on that interface and that the API host can reach it. Keep it private and restart FastAPI after changing the variable. The status route uses Ollama's [model-list API](https://docs.ollama.com/api/tags); an empty `models` array is a successful connection when no models are installed.
 
 After a real Facebook sign-in, use the **Supabase application access token** from `supabase.auth.getSession().data.session.access_token` in the signed-in browser app. Do not use `provider_token`, which belongs to Facebook. Place the access token in a local shell variable and call:
 
@@ -96,9 +97,9 @@ The frontend's typed `getMe()` and `getOllamaStatus()` helpers in `frontend/libs
 - **Sign-in returns to login:** Check browser cookies, project URL/key consistency, and the callback exchange. The callback shows a friendly message if consent was denied or exchange failed.
 - **API `401`:** Use a current Supabase application access token. A Facebook provider token is not accepted.
 - **Admin API `403`:** Sign-in worked, but this is not the dedicated admin account. Sign in at `/auth/admin` with the admin credentials. If that account still receives 403, check that both servers have the same `SAULI_ADMIN_USER_ID` and restart them. See [admin account setup](../services/README.md#dedicated-administrator-account).
-- **API `503`:** Check backend Supabase configuration or Auth availability. For Ollama status, check `OLLAMA_BASE_URL` and connectivity from the API host.
+- **API `503`:** Check backend Supabase configuration or Auth availability. For Ollama status, check `OLLAMA_HOST` and connectivity from the API host.
 - **API `504`:** Increase `OLLAMA_TIMEOUT_SECONDS` or fix a slow/unreachable Ollama host.
-- **CORS error:** Add the exact frontend origin to `CORS_ORIGINS` and restart FastAPI.
+- **CORS error:** Check that `ENVIRONMENT=development` when a local frontend calls the API through a remote URL. Development allows the exact localhost origins above alongside `FRONTEND_ORIGIN`; production allows only `FRONTEND_ORIGIN`. Restart FastAPI after changing either setting.
 
 ## Local checks
 

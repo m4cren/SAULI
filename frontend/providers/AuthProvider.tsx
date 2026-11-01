@@ -3,7 +3,7 @@
 import { createContext, useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/libs/supabase/browser";
-import { safeLocalPath } from "@/libs/auth/redirect";
+import { OAUTH_CALLBACK_PATH, OAUTH_NEXT_COOKIE, oauthCallbackUrl, safeLocalPath } from "@/libs/auth/redirect";
 import type { AuthUser } from "@/libs/types/auth";
 
 export interface AuthContextValue {
@@ -39,15 +39,16 @@ export default function AuthProvider({
   async function signInWithFacebook(next?: string) {
     setIsLoading(true);
     setError(null);
-    const callback = new URL("/auth/callback", window.location.origin);
-    callback.searchParams.set("next", safeLocalPath(next));
+    const cookieOptions = `Path=${OAUTH_CALLBACK_PATH}; SameSite=Lax${window.location.protocol === "https:" ? "; Secure" : ""}`;
+    document.cookie = `${OAUTH_NEXT_COOKIE}=${encodeURIComponent(safeLocalPath(next))}; Max-Age=600; ${cookieOptions}`;
     try {
       const { error: authError } = await supabase.auth.signInWithOAuth({
         provider: "facebook",
-        options: { redirectTo: callback.toString() },
+        options: { redirectTo: oauthCallbackUrl(window.location.origin) },
       });
       if (authError) throw authError;
     } catch {
+      document.cookie = `${OAUTH_NEXT_COOKIE}=; Max-Age=0; ${cookieOptions}`;
       setError("Facebook sign-in could not start. Please try again.");
       setIsLoading(false);
     }
