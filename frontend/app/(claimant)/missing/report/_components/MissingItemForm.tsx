@@ -8,18 +8,11 @@ import { useAuth } from "@/hooks/useAuth";
 import { useClaimant } from "@/hooks/useClaimant";
 import { normalizeNotificationEmail } from "@/libs/claimant/notificationEmail";
 
-function maskedAddress(address: string): string {
-  const [local, domain] = address.trim().split("@");
-  if (!local || !domain) return "Add an email address";
-  return `${local.slice(0, 3)}\u2022\u2022\u2022\u2022\u2022\u2022@${domain}`;
-}
-
 export default function MissingItemForm() {
   const { user } = useAuth();
   const { state, postMissingReport } = useClaimant();
   const [email, setEmail] = useState(user?.email ?? "");
   const emailEdited = useRef(false);
-  const [editingEmail, setEditingEmail] = useState(!normalizeNotificationEmail(user?.email ?? ""));
   const [emailEnabled, setEmailEnabled] = useState(true);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +32,6 @@ export default function MissingItemForm() {
     if (!state.searchRequestId) { setError("Search for your item before posting a report."); return; }
     const normalized = normalizeNotificationEmail(email);
     if (!normalized) {
-      setEditingEmail(true);
       setError("Enter a valid email address for this report.");
       return;
     }
@@ -81,18 +73,16 @@ export default function MissingItemForm() {
             <div className="flex min-w-0 items-start gap-3">
               <span aria-hidden="true" className="flex size-12 shrink-0 items-center justify-center rounded-full bg-[#dcf5f2] text-2xl text-[#076279]">✉</span>
               <div className="min-w-0 flex-1">
-                <label htmlFor="email-enabled" className="block text-[17px] font-bold text-[#101d39]">Gmail notification</label>
+                <label htmlFor="email-enabled" className="block text-[17px] font-bold text-[#101d39]">Email notification</label>
                 <p className="mt-1 text-[14px] leading-snug text-[#4d5d75]">We’ll email you when SAULI finds a possible match.</p>
-                <p className="mt-3 break-all text-[15px] font-semibold text-[#101d39]">{maskedAddress(email)}</p>
-                <button type="button" onClick={() => setEditingEmail(true)} className="mt-1 min-h-10 text-sm font-semibold text-[#086276] underline underline-offset-4 focus-visible:rounded focus-visible:outline-2 focus-visible:outline-[#0B474F]">Change email</button>
               </div>
               <input id="email-enabled" type="checkbox" checked={emailEnabled} onChange={(event) => setEmailEnabled(event.target.checked)} className="mt-1 size-6 shrink-0 accent-[#169f95]" aria-label="Email me when a possible match is found" />
             </div>
-            <div className={editingEmail ? "mt-4" : "hidden"}>
+            <div className="mt-4">
               <label htmlFor="notification-email" className="mb-2 block text-sm font-semibold text-[#102c3b]">Email address</label>
-              <input id="notification-email" type="email" autoComplete="email" required maxLength={254}
+              <input id="notification-email" type="email" inputMode="email" autoComplete="email" required maxLength={254}
                 className="client-field w-full" placeholder="name@example.com" value={email}
-                onChange={(event) => { emailEdited.current = true; setEmail(event.target.value); }} />
+                onChange={(event) => { emailEdited.current = true; setEmail(event.target.value); setError(null); }} />
               {!user?.email && <p className="mt-2 text-sm text-[#526174]">Your sign-in did not provide an email. Enter one to receive match alerts.</p>}
             </div>
           </div>

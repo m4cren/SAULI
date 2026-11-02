@@ -1,8 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 import httpx
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.main import create_app
+from app.schemas.search import SearchRequest
 
 
 class FakeAuthClient:
@@ -34,6 +38,19 @@ def make_app():
         supabase_url="https://project.supabase.co",
         supabase_publishable_key="public-key",
     ))
+
+
+def test_search_rejects_future_last_seen_time():
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    try:
+        SearchRequest(description="Silver wristwatch", last_seen_at=future)
+    except ValidationError as error:
+        assert "Last-seen time cannot be in the future" in str(error)
+    else:
+        raise AssertionError("Future last-seen time was accepted")
+
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    assert SearchRequest(description="Silver wristwatch", last_seen_at=past).last_seen_at == past
 
 
 def test_legacy_ollama_timeout_is_raised_for_vision():

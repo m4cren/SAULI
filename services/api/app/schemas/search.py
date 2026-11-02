@@ -1,6 +1,6 @@
 """Search extraction, comparison and public result contracts."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
@@ -55,6 +55,13 @@ class SearchRequest(StrictModel):
     def parse_iso_last_seen_at(cls, value: datetime | str | None) -> datetime | None:
         if isinstance(value, str):
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
+
+    @field_validator("last_seen_at")
+    @classmethod
+    def reject_future_last_seen_at(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value > datetime.now(timezone.utc):
+            raise ValueError("Last-seen time cannot be in the future")
         return value
 
     @field_validator("additional_filters")

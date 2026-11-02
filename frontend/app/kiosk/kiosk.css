@@ -25,6 +25,8 @@ body:has(.kiosk-shell)::-webkit-scrollbar {
 .kiosk-card { min-width: 0; border: 1px solid #d3e2e2; border-radius: 19px; background: rgba(255,255,255,.97); box-shadow: 0 5px 20px #0b474f0b; }
 .kiosk-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr); gap: 16px; align-items: stretch; }
 .kiosk-main > .kiosk-grid, .kiosk-main > .kiosk-fill-grid { flex: 1; }
+.kiosk-location-review:has(#found-location:focus) .kiosk-retake-action { visibility: hidden; pointer-events: none; }
+@media (min-width: 900px) { .kiosk-location-review { min-height: 420px; } }
 .kiosk-capture-card, .kiosk-image-pair { display: flex; flex-direction: column; }
 .kiosk-capture-preview, .kiosk-image-pair-grid { flex: 1; }
 .kiosk-center-screen { display: flex; min-height: calc(100dvh - 50px); flex: 1; align-items: center; justify-content: center; }

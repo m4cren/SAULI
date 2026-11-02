@@ -45,8 +45,28 @@ test("the post form prefills account email and renders no phone or SMS controls"
   const html = renderToStaticMarkup(React.createElement(Form));
   assert.match(html, /id="notification-email"[^>]*value="auth@example.com"/);
   assert.match(html, /type="email"/);
+  assert.match(html, /<label for="notification-email"[^>]*>Email address<\/label>/);
+  assert.doesNotMatch(html, /Change email|class="hidden"/);
   assert.match(html, /Lost wallet/);
   assert.doesNotMatch(html, /SMS|phone number|type="tel"/i);
+});
+
+test("the post form accepts an address when sign-in provided no email", () => {
+  const Form = loadComponent("app/(claimant)/missing/report/_components/MissingItemForm.tsx", {
+    "next/link": link,
+    "next/navigation": { useRouter: () => ({ push() {} }) },
+    "@/app/components/Button": button,
+    "@/hooks/useAuth": { useAuth: () => ({ user: { email: null } }) },
+    "@/hooks/useClaimant": { useClaimant: () => ({ state: {
+      searchRequestId: "search-id", searchSummary: "Lost watch",
+      searchDraft: { description: "watch" },
+    }, postMissingReport: async () => {} }) },
+    "@/libs/claimant/notificationEmail": { normalizeNotificationEmail },
+  });
+  const html = renderToStaticMarkup(React.createElement(Form));
+  assert.match(html, /id="notification-email"[^>]*value=""/);
+  assert.match(html, /Enter one to receive match alerts/);
+  assert.doesNotMatch(html, /Change email/);
 });
 
 test("posted-report screen shows masked email, guidance, and accessible actions", () => {
@@ -67,7 +87,7 @@ test("posted-report screen shows masked email, guidance, and accessible actions"
   assert.doesNotMatch(html, /renren@example.com|confirmation email/i);
   assert.match(html, /Spam or Promotions/);
   assert.match(html, /href="\/missing\/reports\/report-id"[^>]*>View my report/);
-  assert.match(html, /href="\/"[^>]*>Back to home/);
+  assert.match(html, /href="\/"[^>]*>Return Home/);
 });
 
 test("home report shortcut appears only after the account has a submitted report", () => {

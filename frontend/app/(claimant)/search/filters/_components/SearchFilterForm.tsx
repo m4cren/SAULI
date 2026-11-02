@@ -34,6 +34,13 @@ export default function SearchFilterForm() {
       setError("Add a description before searching.");
       return;
     }
+    if (values.lastSeenAt) {
+      const lastSeen = new Date(values.lastSeenAt).getTime();
+      if (!Number.isFinite(lastSeen) || lastSeen > Date.now()) {
+        setError("Last seen cannot be in the future. Choose an earlier date and time.");
+        return;
+      }
+    }
     setPending(true);
     await runSearch(values);
     router.push("/search/results");

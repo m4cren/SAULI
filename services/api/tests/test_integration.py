@@ -208,6 +208,24 @@ def test_analyze_api_preserves_order_and_safe_missing_images():
         assert missing_back.json()["error"]["code"] == "MISSING_IMAGE"
 
 
+def test_analyze_repairs_missing_view_metadata_without_inventing_image_details():
+    app = create_app(Settings())
+    incomplete = analysis().model_copy(update={"received_view_count": 1,
+                                               "view_observations": analysis().view_observations[:1]})
+    with TestClient(app) as client:
+        app.state.ollama = FakeGateway(answer=incomplete)
+        response = client.post("/api/found-items/analyze", data={"found_location": "Canteen"}, files={
+            "front_image": ("front.png", png(), "image/png"),
+            "back_image": ("back.png", png(), "image/png")})
+    assert response.status_code == 200
+    result = response.json()["analysis"]
+    assert result["received_view_count"] == 2
+    assert [view["image_index"] for view in result["view_observations"]] == [1, 2]
+    assert result["view_observations"][1]["damage_observations"] == []
+    assert result["view_observations"][1]["notes"] == []
+    assert result["needs_review"] is True
+
+
 @pytest.mark.parametrize("verdict,matches,conflicts", [
     ("different", ["both are key sets"], ["different fob shape"]),
     ("uncertain", ["both are key sets"], []),
@@ -376,14 +394,27 @@ def test_correction_keeps_both_captured_views_when_model_drops_one(returned_indi
         assert result.analysis.view_observations[1].notes == []
 
 
-def test_correction_rejects_missing_original_capture_view():
+def test_correction_repairs_missing_original_capture_view():
     from app.schemas.found_items import ReconcileRequest
 
-    current = analysis().model_copy(update={"view_observations": analysis().view_observations[:1]})
-    revised = analysis().model_copy(update={"extraction_summary": "Corrected bottle"})
+    current = analysis().model_copy(update={"received_view_count": 1,
+                                            "view_observations": analysis().view_observations[:1]})
+    revised = analysis().model_copy(deep=True, update={"extraction_summary": "Corrected bottle"})
+    revised.view_observations[1].notes = ["Invented image detail"]
     request = ReconcileRequest(analysis=current, found_location="Canteen", correction_notes="It has a dent")
-    with pytest.raises(ServiceError, match="INVALID_ANALYSIS"):
-        asyncio.run(reconcile(FakeGateway(revised), "model", request))
+    result = asyncio.run(reconcile(FakeGateway(revised), "model", request))
+    assert result.summary == "Corrected bottle"
+    assert result.analysis.received_view_count == 2
+    assert [view.image_index for view in result.analysis.view_observations] == [1, 2]
+    assert result.analysis.view_observations[1].notes == []
+    assert result.analysis.view_observations[1].visible_region == "Captured view not described by model"
+    assert result.analysis.needs_review is True
+    app = create_app(Settings())
+    with TestClient(app) as client:
+        app.state.ollama = FakeGateway(revised)
+        response = client.post("/api/found-items/reconcile-review", json=request.model_dump(mode="json"))
+    assert response.status_code == 200
+    assert response.json()["analysis"]["view_observations"][1]["notes"] == []
 
 
 def test_correction_does_not_count_repaired_view_metadata_as_a_change():
