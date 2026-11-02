@@ -130,6 +130,7 @@ function useKioskFlow() {
         category: result.analysis.category, color: result.analysis.colors.join(", "),
         material: result.analysis.material.join(", "), size: result.analysis.storage_size === "pocket" ? "Pocket-size" : "Medium-size" } });
     } catch (error) {
+      if (error instanceof SauliApiError && error.code === "VIEW_MISMATCH") { dispatch({ type: "DIFFERENT_ITEM" }); return; }
       const reason = error instanceof SauliApiError && ({ NO_ITEM_DETECTED: "noItem", HAZARDOUS_ITEM: "hazardousItem", LOOSE_MONEY: "looseMoney" } as const)[error.code as "NO_ITEM_DETECTED" | "HAZARDOUS_ITEM" | "LOOSE_MONEY"];
       if (reason) dispatch({ type: "CAPTURE_REJECTED", reason });
       else dispatch({ type: "IDENTIFY_FAILED", message: error instanceof Error ? error.message : "Analysis failed." });

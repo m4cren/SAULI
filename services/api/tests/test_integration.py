@@ -17,6 +17,7 @@ from app.integrations.ollama import OllamaGateway, first_json_object, response_p
 from app.main import create_app
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.found_items import FoundItemAnalysis
+from app.schemas.view_consistency import ViewConsistency
 from app.schemas.search import CandidateBatch, CandidateComparison, QueryAnalysis, SearchRequest
 from app.services.analysis import reconcile, safe_analysis, scrub_private
 from app.services.found_items import confirm_item, public_details
@@ -48,15 +49,20 @@ def analysis():
 
 
 class FakeGateway:
-    def __init__(self, answer=None):
+    def __init__(self, answer=None, comparison=None):
         self.answer = answer or analysis()
+        self.comparison = comparison or ViewConsistency(
+            verdict="same", image_1_features=["blue body", "metal cap"],
+            image_2_features=["blue body", "metal cap"],
+            matching_features=["blue body", "metal cap"], conflicting_features=[],
+            reason="The same body and cap are visible from two angles.")
         self.images = None
         self.calls = 0
 
-    async def structured(self, _model, _prompt, _schema, images=None):
+    async def structured(self, _model, _prompt, schema, images=None):
         self.calls += 1
         self.images = images
-        return self.answer
+        return self.comparison if schema is ViewConsistency else self.answer
 
 
 class FakeRepo:
@@ -191,6 +197,7 @@ def test_analyze_api_preserves_order_and_safe_missing_images():
             "front_image": ("front.png", front, "image/png"), "back_image": ("back.png", back, "image/png")})
         assert result.status_code == 200
         assert gateway.images == [front, back]
+        assert gateway.calls == 2
         assert result.json()["analysis"]["storage_size"] == "medium"
         extra = client.post("/api/found-items/analyze", data={"found_location": "Library"}, files={
             "front_image": ("front.png", front, "image/png"), "back_image": ("back.png", back, "image/png"),
@@ -199,6 +206,84 @@ def test_analyze_api_preserves_order_and_safe_missing_images():
         missing_back = client.post("/api/found-items/analyze", data={"found_location": "Library"},
             files={"front_image": ("front.png", front, "image/png")})
         assert missing_back.json()["error"]["code"] == "MISSING_IMAGE"
+
+
+@pytest.mark.parametrize("verdict,matches,conflicts", [
+    ("different", ["both are key sets"], ["different fob shape"]),
+    ("uncertain", ["both are key sets"], []),
+    ("same", ["both are key sets"], []),
+    ("same", ["same fob", "same fob"], []),
+])
+def test_analysis_requires_distinctive_cross_view_evidence(verdict, matches, conflicts):
+    app = create_app(Settings())
+    with TestClient(app) as client:
+        gateway = FakeGateway(comparison=ViewConsistency(
+            verdict=verdict, image_1_features=["black fob", "three blades"],
+            image_2_features=["round fob", "four blades"],
+            matching_features=matches, conflicting_features=conflicts,
+            reason="The key sets cannot be verified as the same physical set."))
+        app.state.ollama = gateway
+        response = client.post("/api/found-items/analyze", data={"found_location": "Canteen"}, files={
+            "front_image": ("front.png", png(), "image/png"),
+            "back_image": ("back.png", png(), "image/png")})
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "VIEW_MISMATCH"
+        assert gateway.calls == 1
+
+
+def test_empty_capture_keeps_no_item_feedback():
+    app = create_app(Settings())
+    with TestClient(app) as client:
+        app.state.ollama = FakeGateway(comparison=ViewConsistency(
+            verdict="no_item", image_1_features=[], image_2_features=[],
+            matching_features=[], conflicting_features=[], reason="One image is empty."))
+        response = client.post("/api/found-items/analyze", data={"found_location": "Canteen"}, files={
+            "front_image": ("front.png", png(), "image/png"),
+            "back_image": ("back.png", png(), "image/png")})
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "NO_ITEM_DETECTED"
+
+
+def test_viewpoint_change_with_matching_details_continues_to_full_analysis():
+    app = create_app(Settings())
+    with TestClient(app) as client:
+        gateway = FakeGateway(comparison=ViewConsistency(
+            verdict="same", image_1_features=["black fob", "three distinct blades"],
+            image_2_features=["black fob rotated", "same three blades seen edge-on"],
+            matching_features=["same fob shape", "same three blade shapes"],
+            conflicting_features=[], reason="Rotation accounts for the different silhouette."))
+        app.state.ollama = gateway
+        response = client.post("/api/found-items/analyze", data={"found_location": "Canteen"}, files={
+            "front_image": ("front.png", png(), "image/png"),
+            "back_image": ("back.png", png(), "image/png")})
+        assert response.status_code == 200
+        assert gateway.calls == 2
+
+
+def test_full_analysis_cannot_override_failed_view_comparison():
+    app = create_app(Settings())
+    with TestClient(app) as client:
+        gateway = FakeGateway(answer=analysis().model_copy(update={"views_consistent": False}))
+        app.state.ollama = gateway
+        response = client.post("/api/found-items/analyze", data={"found_location": "Canteen"}, files={
+            "front_image": ("front.png", png(), "image/png"),
+            "back_image": ("back.png", png(), "image/png")})
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "VIEW_MISMATCH"
+
+
+def test_inconsistent_views_cannot_be_corrected_or_stored():
+    from app.schemas.found_items import ReconcileRequest
+
+    inconsistent = analysis().model_copy(update={"views_consistent": False})
+    front = validate_image(png(), "image/png", Settings())
+    repo = FakeRepo()
+    with pytest.raises(ServiceError, match="VIEW_MISMATCH"):
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, inconsistent, "pocket"))
+    assert repo.uploaded == []
+    with pytest.raises(ServiceError, match="VIEW_MISMATCH"):
+        asyncio.run(reconcile(FakeGateway(), "model", ReconcileRequest(
+            analysis=inconsistent, found_location="Library", correction_notes="Same item")))
 
 
 def test_confirmation_idempotency_and_cleanup(caplog):

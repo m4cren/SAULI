@@ -30,6 +30,8 @@ def normalized_search_document(analysis: FoundItemAnalysis, location: str, notes
 
 async def confirm_item(repo, key: UUID, front: ImageData, back: ImageData, location: str, notes: str | None,
                        analysis: FoundItemAnalysis, storage_size: str) -> ConfirmedItemResponse:
+    if not analysis.views_consistent:
+        raise ServiceError("VIEW_MISMATCH", "Retake the photos before storing this item.", 422)
     if storage_size not in ("pocket", "medium"):
         raise ServiceError("INVALID_STORAGE_SIZE", "Choose pocket-size or medium-size storage before confirming.", 422)
     prior = await repo.find_by_key(key)

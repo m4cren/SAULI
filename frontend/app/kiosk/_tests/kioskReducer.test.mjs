@@ -46,6 +46,10 @@ test("inconsistent views keep side one and send side two back for capture", () =
   state = move(state, { type: "IDENTIFY_STARTED" });
   state = move(state, { type: "DIFFERENT_ITEM" });
   assert.equal(state.screen.step, "differentItem");
+  const retakeFirst = move(state, { type: "RETAKE_SIDE", side: "front" });
+  assert.equal(retakeFirst.screen.step, "captureFront");
+  assert.equal(retakeFirst.images.front, null);
+  assert.equal(retakeFirst.images.back, "blob:other");
   state = move(state, { type: "RETAKE_SIDE", side: "back" });
   assert.equal(state.screen.step, "captureBack");
   assert.equal(state.images.front, "blob:first");

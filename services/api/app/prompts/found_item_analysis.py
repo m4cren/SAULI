@@ -1,8 +1,9 @@
 ﻿"""Exact active two-view prompt from the supplied SAULI backend handoff."""
 
 FOUND_ITEM_ANALYSIS_PROMPT = """
-Analyze all supplied photographs as different views of the same reported
-lost item. Combine the evidence into exactly one JSON object. Do not count
+Analyze two photographs captured for one found-item deposit. They may show
+the same physical item or different items. Compare them independently before
+combining evidence into exactly one JSON object. Do not count
 the same object or component more than once merely because it appears in
 multiple views.
 
@@ -26,8 +27,13 @@ angles must be reported as a dent.
 Perform the following inspection internally before producing the JSON:
 
 1. VIEW CONSISTENCY
-Determine whether all photographs show the same physical item. Compare its
-shape, color, markings, attachments, damage, and component placement.
+Determine whether both photographs show the same physical item. Compare its
+shape, markings, attachments, damage, and component placement. A changed
+perspective or lighting alone does not mean a different item. A shared object
+category or color alone does not prove the same item. For keys, compare the
+individual visible blades, fob, rings, and attachments; do not merge two
+different key sets simply because both contain keys. Set views_consistent to
+false when a stable feature conflicts or identity cannot be established.
 
 2. OBJECT IDENTIFICATION
 Identify the item using:
