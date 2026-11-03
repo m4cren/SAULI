@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sauli-pi-controller"
+version = "0.1.0"
+description = "Registered SAULI kiosk device bootstrap and heartbeat"
+requires-python = ">=3.11"
+
+[project.scripts]
+sauli-pi = "sauli_pi.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true

@@ -1,0 +1,15 @@
+[Unit]
+Description=SAULI registered kiosk controller and browser
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=6
+
+[Service]
+Type=simple
+ExecStart=/opt/sauli/pi-controller/.venv/bin/python -m sauli_pi.main run --config /etc/sauli/controller.json
+Restart=on-failure
+RestartSec=20
+
+[Install]
+WantedBy=default.target

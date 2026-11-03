@@ -18,6 +18,15 @@ class CreateRetrievalRequest(RetrievalModel):
     match_candidate_id: UUID
 
 
+class RetrievalUnitLocation(RetrievalModel):
+    unit_code: str
+    display_name: str
+    campus_name: str
+    building_name: str
+    floor: str | None = None
+    location_description: str | None = None
+
+
 class IssuedRetrievalResponse(RetrievalModel):
     id: UUID
     raw_token: str
@@ -26,6 +35,7 @@ class IssuedRetrievalResponse(RetrievalModel):
     expires_at: AwareDatetime
     status: SessionStatus
     item_summary: str
+    unit: RetrievalUnitLocation | None = None
 
 
 class RetrievalStatusResponse(RetrievalModel):
@@ -34,6 +44,7 @@ class RetrievalStatusResponse(RetrievalModel):
     issued_at: AwareDatetime
     expires_at: AwareDatetime
     item_summary: str
+    unit: RetrievalUnitLocation | None = None
     validated_at: AwareDatetime | None = None
     completed_at: AwareDatetime | None = None
     slot_code: str | None = None

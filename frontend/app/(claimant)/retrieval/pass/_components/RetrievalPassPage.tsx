@@ -116,6 +116,13 @@ export default function RetrievalPassPage() {
       backLabel="Search results"
     />
     <main className="client-content client-overlap space-y-4 pb-8">
+      <section className="client-card p-4" aria-label="SAULI station location">
+        <h2 className="text-sm font-bold text-[#0B474F]">Go to this SAULI station</h2>
+        {session.unit ? <>
+          <p className="mt-1 font-semibold text-[#092f37]">{session.unit.display_name || session.unit.unit_code}</p>
+          <p className="mt-1 text-sm text-[#526570]">{[session.unit.campus_name, session.unit.building_name, session.unit.floor, session.unit.location_description].filter(Boolean).join(" · ")}</p>
+        </> : <p className="mt-1 text-sm text-[#526570]">Station location is unavailable. Ask SAULI staff before traveling.</p>}
+      </section>
       <section className="client-card overflow-hidden p-5 text-center shadow-[0_15px_35px_rgba(5,81,86,0.1)]" aria-label="Retrieval pass">
         <h2 className="sr-only">Retrieval QR for {session.itemSummary}</h2>
         {usable ? <>

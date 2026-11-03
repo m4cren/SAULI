@@ -94,6 +94,7 @@ export function claimantReducer(state: ClaimantState, action: ClaimantAction): C
         ...state.retrievalSession,
         status: action.result.status,
         itemSummary: action.result.item_summary,
+        unit: action.result.unit ?? state.retrievalSession.unit,
         qrPayload: action.result.status === "issued" ? state.retrievalSession.qrPayload : null,
         validatedAt: action.result.validated_at,
         completedAt: action.result.completed_at,

@@ -1,0 +1,9 @@
+{
+  "backend_url": "https://YOUR-BACKEND-PUBLIC-HTTPS-ORIGIN",
+  "frontend_url": "https://sauli-system.vercel.app",
+  "unit_code": "SAULI-LSPUSPCC-001",
+  "device_code": "KIOSK-LSPUSPCC-ENGINEERING-01",
+  "credential_file": "/var/lib/sauli/credential",
+  "heartbeat_seconds": 30,
+  "browser": "chromium"
+}

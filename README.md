@@ -72,7 +72,7 @@ npm.cmd run dev
 
 Open `http://localhost:3000/auth/login` for the claimant app or `http://localhost:3000/kiosk` for the kiosk. The API health route is `http://localhost:8000/health`, and its interactive documentation is at `http://localhost:8000/docs`.
 
-For Supabase migrations, Facebook OAuth, administrator setup, Ollama, EmailJS, and troubleshooting, follow the detailed guides: [local development](docs/local-development.md), [backend and API](services/README.md), and [database setup](supabase/README.md).
+For Supabase migrations, Facebook OAuth, administrator setup, Ollama, EmailJS, and troubleshooting, follow the detailed guides: [local development](docs/local-development.md), [backend and API](services/README.md), [database setup](supabase/README.md), and [multi-unit rollout](docs/multi-unit-rollout.md).
 
 ## Checks
 

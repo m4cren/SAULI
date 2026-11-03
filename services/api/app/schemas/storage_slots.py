@@ -13,6 +13,7 @@ SlotStatus = Literal["available", "reserved", "occupied", "out_of_service"]
 
 class StorageSlotResponse(StrictModel):
     id: UUID
+    unit_id: UUID
     code: str
     size_class: SizeClass
     ordinal: int

@@ -71,19 +71,19 @@ async def replace(repo, settings, session_id: UUID, user_id: UUID) -> dict:
     return {**row, "raw_token": raw, "qr_payload": qr_payload(raw)}
 
 
-async def validate(repo, settings, payload: str) -> dict:
+async def validate(repo, settings, payload: str, unit_id: UUID) -> dict:
     raw = parse_qr_payload(payload)
     action = new_token()
     row = checked(
         await repo.validate_retrieval(
-            token_hash(raw, pepper(settings)), token_hash(action, pepper(settings))
+            token_hash(raw, pepper(settings)), token_hash(action, pepper(settings)), unit_id
         )
     )
     return {**row, "action_token": action}
 
 
 async def simulate(
-    repo, settings, session_id: UUID, action_token: str, event: str
+    repo, settings, session_id: UUID, action_token: str, event: str, unit_id: UUID
 ) -> dict:
     if not TOKEN_PATTERN.fullmatch(action_token):
         raise ServiceError(
@@ -93,6 +93,6 @@ async def simulate(
         )
     return checked(
         await repo.simulate_retrieval(
-            session_id, token_hash(action_token, pepper(settings)), event
+            session_id, token_hash(action_token, pepper(settings)), event, unit_id
         )
     )

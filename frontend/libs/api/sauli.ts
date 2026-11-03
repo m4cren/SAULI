@@ -43,7 +43,9 @@ export interface FoundItemAnalysis {
 
 export interface AnalysisResponse { analysis: FoundItemAnalysis; found_location: string; notes: string | null; summary: string; model: string }
 export interface ConfirmedItem { item_id: string; status: "available"; summary: string; found_location: string; found_at: string; storage_size: StorageSize; slot_code: string; section: string; slot_status: "reserved" | "occupied"; placement_status: "reserved" | "placed" }
-export interface StorageSlot { id: string; code: string; size_class: StorageSize; ordinal: number; status: SlotStatus; is_active: boolean; current_found_item_id: string | null; item_summary: string | null; reserved_at: string | null; occupied_at: string | null; updated_at: string }
+export interface StorageSlot { id: string; unit_id: string; code: string; size_class: StorageSize; ordinal: number; status: SlotStatus; is_active: boolean; current_found_item_id: string | null; item_summary: string | null; reserved_at: string | null; occupied_at: string | null; updated_at: string }
+export interface KioskDevice { id: string; unit_id: string; device_code: string; hostname: string | null; hardware_type: string | null; status: "pending" | "active" | "revoked"; last_seen_at: string | null }
+export interface SauliUnit { id: string; unit_code: string; display_name: string; campus_code: string; campus_name: string; building_name: string; floor: string | null; location_description: string | null; status: "provisioning" | "active" | "maintenance" | "inactive" | "retired"; capacity: { total: number; available: number; reserved: number; occupied: number; out_of_service: number }; devices: KioskDevice[] }
 export interface StorageSlotImages { item_id: string; front_image_url: string | null; back_image_url: string | null }
 export interface SlotAvailability { size_class: StorageSize; available: number; reserved: number; occupied: number; can_assign: boolean }
 export interface ClaimDecision { match_candidate_id: string; decision: "accepted" | "rejected"; item_id: string | null; slot_code: string | null; section: string | null }
@@ -53,21 +55,26 @@ export interface MissingReportApi { id: string; search_request_id: string; summa
 export interface MissingReportDetail extends MissingReportApi { candidate: MatchResult | null; candidate_decision: "pending" | "accepted" | "rejected" | null }
 export interface FoundItemDetails { item_id: string; status: "available" | "claimed" | "retrieved" | "archived"; name: string; summary: string; category: string; colors: string[]; visible_markings: string[]; condition: string; found_location: string; found_at: string; front_image_url: string | null; back_image_url: string | null }
 export type RetrievalStatus = "issued" | "validated" | "completed" | "expired" | "cancelled";
-export interface IssuedRetrieval { id: string; raw_token: string; qr_payload: string; issued_at: string; expires_at: string; status: RetrievalStatus; item_summary: string }
-export interface RetrievalSessionStatus { id: string; status: RetrievalStatus; issued_at: string; expires_at: string; item_summary: string; validated_at: string | null; completed_at: string | null; slot_code: string | null; section: StorageSize | null; wrong_item_out: boolean; retriever: string | null; can_replace: boolean; completed: boolean }
+export interface RetrievalUnitLocation { unit_code: string; display_name: string; campus_name: string; building_name: string; floor: string | null; location_description: string | null }
+export interface IssuedRetrieval { id: string; raw_token: string; qr_payload: string; issued_at: string; expires_at: string; status: RetrievalStatus; item_summary: string; unit: RetrievalUnitLocation | null }
+export interface RetrievalSessionStatus { id: string; status: RetrievalStatus; issued_at: string; expires_at: string; item_summary: string; unit: RetrievalUnitLocation | null; validated_at: string | null; completed_at: string | null; slot_code: string | null; section: StorageSize | null; wrong_item_out: boolean; retriever: string | null; can_replace: boolean; completed: boolean }
 export interface ValidatedRetrieval { id: string; status: "validated"; item_summary: string; slot_code: string; section: StorageSize; slot_status: "occupied"; action_token: string }
 export interface SimulatedRetrieval { id: string; status: "validated" | "completed"; wrong_item_out: boolean; completed_at: string | null }
 export interface RetrievalLog { id: string; retrieval_session_id: string; retriever: string; item_summary: string; slot_code: string; retrieved_at: string; completion_source: string }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+async function api<T>(path: string, init?: RequestInit, origin = baseUrl): Promise<T> {
   let response: Response;
-  try { response = await fetch(`${baseUrl}${path}`, { ...init, cache: "no-store" }); }
+  try { response = await fetch(`${origin}${path}`, { ...init, cache: "no-store" }); }
   catch { throw new Error("SAULI is unavailable. Check the backend connection and try again."); }
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { detail?: string; error?: { code?: string; message?: string; requested_size?: StorageSize } } | null;
     throw new SauliApiError(body?.error?.message || body?.detail || `Request failed (${response.status}). Please try again.`, body?.error?.code, body?.error?.requested_size, response.status);
   }
   return response.json() as Promise<T>;
+}
+
+function kioskApi<T>(path: string, init?: RequestInit): Promise<T> {
+  return api<T>(path.replace(/^\/api\//, "/api/kiosk/"), init, "");
 }
 
 export class SauliApiError extends Error {
@@ -90,29 +97,50 @@ function imageForm(front: File, back: File, location: string): FormData {
 
 export function getBackendHealth() { return api<Record<string, string>>("/health"); }
 export function analyzeFoundItem(front: File, back: File, location: string) {
-  return api<AnalysisResponse>("/api/found-items/analyze", { method: "POST", body: imageForm(front, back, location) });
+  return kioskApi<AnalysisResponse>("/api/found-items/analyze", { method: "POST", body: imageForm(front, back, location) });
 }
 export function reconcileFoundItemReview(analysis: FoundItemAnalysis, location: string, correction: string) {
-  return api<AnalysisResponse>("/api/found-items/reconcile-review", { method: "POST", headers: { "Content-Type": "application/json" },
+  return kioskApi<AnalysisResponse>("/api/found-items/reconcile-review", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ analysis, found_location: location, correction_notes: correction }) });
 }
 export function confirmAndStoreFoundItem(front: File, back: File, location: string, analysis: FoundItemAnalysis, size: StorageSize, key: string) {
   const form = imageForm(front, back, location);
   form.append("analysis_json", JSON.stringify(analysis));
   form.append("storage_size", size);
-  return api<ConfirmedItem>("/api/found-items/confirm-and-store", { method: "POST", headers: { "X-Idempotency-Key": key }, body: form });
+  return kioskApi<ConfirmedItem>("/api/found-items/confirm-and-store", { method: "POST", headers: { "X-Idempotency-Key": key }, body: form });
 }
 export function simulateItemPlacement(itemId: string, slotCode: string) {
-  return api<ConfirmedItem>(`/api/found-items/${encodeURIComponent(itemId)}/simulate-placement`, {
+  return kioskApi<ConfirmedItem>(`/api/found-items/${encodeURIComponent(itemId)}/simulate-placement`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slot_code: slotCode }),
   });
 }
 export function getSlotAvailability(size: StorageSize) {
-  return api<SlotAvailability>(`/api/storage-slots/availability?size_class=${size}`);
+  return kioskApi<SlotAvailability>(`/api/storage-slots/availability?size_class=${size}`);
 }
-export async function getStorageSlots() {
-  const rows = await api<StorageSlot[]>("/api/storage-slots", { headers: await authHeaders() });
+export async function getStorageSlots(unitId?: string) {
+  const rows = await api<StorageSlot[]>(`/api/storage-slots${unitId ? `?unit_id=${encodeURIComponent(unitId)}` : ""}`, { headers: await authHeaders() });
   return rows.map((row) => ({ ...row, is_active: row.is_active !== false && isSlotCode(row.code) }));
+}
+export async function getUnitFleet() {
+  return api<SauliUnit[]>("/api/units/admin/fleet", { headers: await authHeaders() });
+}
+export async function createSauliUnit(input: Pick<SauliUnit, "unit_code" | "display_name" | "campus_code" | "campus_name" | "building_name" | "floor" | "location_description">) {
+  return api<SauliUnit>("/api/units/admin", { method: "POST", headers: { "Content-Type": "application/json", ...await authHeaders() }, body: JSON.stringify(input) });
+}
+export async function editSauliUnit(unitId: string, input: Pick<SauliUnit, "display_name" | "campus_code" | "campus_name" | "building_name" | "floor" | "location_description">) {
+  return api<SauliUnit>(`/api/units/admin/${encodeURIComponent(unitId)}`, { method: "PUT", headers: { "Content-Type": "application/json", ...await authHeaders() }, body: JSON.stringify(input) });
+}
+export async function changeUnitStatus(unitId: string, status: SauliUnit["status"]) {
+  return api<SauliUnit>(`/api/units/admin/${encodeURIComponent(unitId)}/status`, { method: "PATCH", headers: { "Content-Type": "application/json", ...await authHeaders() }, body: JSON.stringify({ status }) });
+}
+export async function addKioskDevice(unitId: string, device_code: string, hostname: string, hardware_type: string) {
+  return api<KioskDevice>(`/api/units/admin/${encodeURIComponent(unitId)}/devices`, { method: "POST", headers: { "Content-Type": "application/json", ...await authHeaders() }, body: JSON.stringify({ device_code, hostname, hardware_type }) });
+}
+export async function approveKioskPairing(deviceId: string) {
+  return api<{ pairing_code: string; expires_at: string }>(`/api/units/admin/devices/${encodeURIComponent(deviceId)}/approve-pairing`, { method: "POST", headers: await authHeaders() });
+}
+export async function revokeKioskDevice(deviceId: string) {
+  return api<{ revoked: boolean }>(`/api/units/admin/devices/${encodeURIComponent(deviceId)}/revoke`, { method: "POST", headers: await authHeaders() });
 }
 export async function getStorageSlotImages(itemId: string) {
   return api<StorageSlotImages>(`/api/storage-slots/items/${encodeURIComponent(itemId)}/images`, { headers: await authHeaders() });
@@ -152,11 +180,11 @@ export async function replaceRetrievalSession(id: string) {
   return api<IssuedRetrieval>(`/api/retrieval-sessions/${encodeURIComponent(id)}/replace`, { method: "POST", headers: await authHeaders() });
 }
 export function validateRetrievalQr(qrPayload: string) {
-  return api<ValidatedRetrieval>("/api/retrieval-sessions/validate", { method: "POST", headers: { "Content-Type": "application/json" },
+  return kioskApi<ValidatedRetrieval>("/api/retrieval-sessions/validate", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ qr_payload: qrPayload }) });
 }
 export function simulateRetrievalEvent(id: string, actionToken: string, event: "completion" | "wrong-item" | "item-returned") {
-  return api<SimulatedRetrieval>(`/api/retrieval-sessions/${encodeURIComponent(id)}/simulate-${event}`, {
+  return kioskApi<SimulatedRetrieval>(`/api/retrieval-sessions/${encodeURIComponent(id)}/simulate-${event}`, {
     method: "POST", headers: { "X-Retrieval-Action": actionToken },
   });
 }

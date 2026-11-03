@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 from app.auth.dependencies import get_current_user
 from app.config import Settings
 from app.core.errors import ServiceError
-from app.main import create_app
+from app.main import create_app as create_application
+from app.auth.kiosk import get_kiosk_session
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.auth import UserResponse
 from app.services.matching import eligible
@@ -22,6 +23,13 @@ from app.services.storage_slots import availability
 
 MIGRATION = Path(__file__).resolve().parents[3] / "supabase/migrations/202610110001_sauli_storage_slots.sql"
 FINAL_LAYOUT_MIGRATION = Path(__file__).resolve().parents[3] / "supabase/migrations/202610310001_sauli_twelve_active_storage_slots.sql"
+TEST_UNIT_ID = uuid4()
+
+
+def create_app(settings):
+    app = create_application(settings)
+    app.dependency_overrides[get_kiosk_session] = lambda: {"id": str(uuid4()), "unit_id": str(TEST_UNIT_ID)}
+    return app
 
 
 def test_initial_migration_history_keeps_atomic_transitions():
@@ -112,7 +120,7 @@ def test_full_section_uses_stable_409_error_and_requested_size():
         async def find_by_key(self, _key): return None
         async def upload(self, *_args): pass
         async def remove(self, _paths): pass
-        async def reserve_item(self, _row, size):
+        async def reserve_item(self, _row, size, _unit_id):
             raise ServiceError("NO_AVAILABLE_STORAGE_SLOT", "The section is full.", 409, {"requested_size": size})
 
     app.state.items = FullRepo()
@@ -134,8 +142,9 @@ def test_placement_returns_assigned_slot_and_is_idempotent_at_api_boundary():
 
     class PlacementRepo:
         calls = 0
-        async def simulate_placement(self, received_id, code):
+        async def simulate_placement(self, received_id, code, unit_id):
             assert received_id == item_id and code == "P-03"
+            assert unit_id == TEST_UNIT_ID
             self.calls += 1
             return {"item": {**row, "placement_status": "placed"}, "slot": {**slot, "status": "occupied"}}
 
@@ -175,9 +184,9 @@ def test_admin_slot_list_requires_role_and_returns_all_positions():
     codes = [f"P-{number:02}" for number in range(1, 11)] + [f"M-{number:02}" for number in range(1, 6)]
 
     class SlotRepo:
-        async def list_slots(self, include_items=False):
+        async def list_slots(self, include_items=False, unit_id=None):
             assert include_items
-            return [{"id": str(uuid4()), "code": code, "size_class": "pocket" if code.startswith("P") else "medium",
+            return [{"id": str(uuid4()), "unit_id": str(TEST_UNIT_ID), "code": code, "size_class": "pocket" if code.startswith("P") else "medium",
                      "ordinal": int(code[-2:]), "status": "available", "current_found_item_id": None,
                      "item_summary": None, "reserved_at": None, "occupied_at": None, "updated_at": now} for code in codes]
 

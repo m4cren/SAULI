@@ -51,6 +51,7 @@ export interface ClaimantRetrievalSession {
   expiresAt: string;
   status: "issued" | "validated" | "completed" | "expired" | "cancelled";
   itemSummary: string;
+  unit: import("@/libs/api/sauli").RetrievalUnitLocation | null;
   validatedAt: string | null;
   completedAt: string | null;
   slotCode: string | null;

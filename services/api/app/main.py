@@ -12,7 +12,8 @@ from app.config import Settings
 from app.core.errors import ServiceError
 from app.integrations.ollama import OllamaGateway
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
-from app.routes import found_items, health, matches, me, missing_reports, ollama, retrieval_sessions, storage_slots
+from app.repositories.supabase_kiosks import SupabaseKioskRepository
+from app.routes import found_items, health, kiosk_devices, matches, me, missing_reports, ollama, retrieval_sessions, storage_slots, units
 from app.services.email_notifications import EmailJSClient, run_worker
 
 log = logging.getLogger("sauli.api")
@@ -45,12 +46,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="SAULI API", lifespan=lifespan)
     app.state.settings = config
     app.state.items = SupabaseFoundItemRepository(config)
+    app.state.kiosks = SupabaseKioskRepository(app.state.items)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(config.cors_origins),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Idempotency-Key", "X-Retrieval-Action"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Idempotency-Key", "X-Retrieval-Action", "X-Kiosk-Session"],
     )
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, exc: ServiceError):
@@ -73,6 +75,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(missing_reports.router)
     app.include_router(storage_slots.router)
     app.include_router(retrieval_sessions.router)
+    app.include_router(units.router)
+    app.include_router(kiosk_devices.router)
     return app
 
 

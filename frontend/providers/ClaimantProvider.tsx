@@ -59,6 +59,7 @@ function loadInitialState(userId: string): ClaimantState {
         slotCode: parsed.retrievalSession.slotCode ?? null,
         section: parsed.retrievalSession.section ?? null,
         wrongItemOut: parsed.retrievalSession.wrongItemOut ?? false,
+        unit: parsed.retrievalSession.unit ?? null,
         retriever: parsed.retrievalSession.retriever ?? null,
       } : null };
     }
@@ -79,6 +80,7 @@ export default function ClaimantProvider({ children, userId }: { children: React
   function savedSession(issued: IssuedRetrieval): NonNullable<ClaimantState["retrievalSession"]> {
     return { id: issued.id, qrPayload: issued.qr_payload, issuedAt: issued.issued_at,
       expiresAt: issued.expires_at, status: issued.status, itemSummary: issued.item_summary,
+      unit: issued.unit,
       validatedAt: null, completedAt: null, slotCode: null, section: null, wrongItemOut: false, retriever: null };
   }
 

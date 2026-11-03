@@ -14,7 +14,8 @@ from PIL import Image
 from app.config import Settings
 from app.core.errors import ServiceError
 from app.integrations.ollama import OllamaGateway, first_json_object, response_payload
-from app.main import create_app
+from app.main import create_app as create_application
+from app.auth.kiosk import get_kiosk_session
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.found_items import FoundItemAnalysis
 from app.schemas.view_consistency import ViewConsistency
@@ -23,6 +24,14 @@ from app.services.analysis import reconcile, safe_analysis, scrub_private
 from app.services.found_items import confirm_item, public_details
 from app.services.images import validate_image
 from app.services.matching import eligible, readable_search_summary, run_search, score
+
+TEST_UNIT_ID = uuid4()
+
+
+def create_app(settings):
+    app = create_application(settings)
+    app.dependency_overrides[get_kiosk_session] = lambda: {"id": str(uuid4()), "unit_id": str(TEST_UNIT_ID)}
+    return app
 
 
 def png(width=2, height=2):
@@ -88,10 +97,10 @@ class FakeRepo:
     async def remove(self, paths):
         self.removed.extend(paths)
 
-    async def reserve_item(self, row, size):
+    async def reserve_item(self, row, size, unit_id):
         if self.fail_insert:
             raise ServiceError("DATABASE_INSERT_FAILED", "Insert failed", 503)
-        row = {**row, "storage_size": size, "placement_status": "reserved"}
+        row = {**row, "unit_id": str(unit_id), "storage_size": size, "placement_status": "reserved"}
         self.items[row["idempotency_key"]] = row
         self.slot = {"code": "P-01" if size == "pocket" else "M-01", "size_class": size, "status": "reserved"}
         return {"item": row, "slot": self.slot}
@@ -297,7 +306,7 @@ def test_inconsistent_views_cannot_be_corrected_or_stored():
     front = validate_image(png(), "image/png", Settings())
     repo = FakeRepo()
     with pytest.raises(ServiceError, match="VIEW_MISMATCH"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, inconsistent, "pocket"))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, inconsistent, "pocket", TEST_UNIT_ID))
     assert repo.uploaded == []
     with pytest.raises(ServiceError, match="VIEW_MISMATCH"):
         asyncio.run(reconcile(FakeGateway(), "model", ReconcileRequest(
@@ -308,18 +317,18 @@ def test_confirmation_idempotency_and_cleanup(caplog):
     repo = FakeRepo()
     front = validate_image(png(), "image/png", Settings())
     key = uuid4()
-    saved = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis(), "pocket"))
-    duplicate = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis(), "pocket"))
+    saved = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis(), "pocket", TEST_UNIT_ID))
+    duplicate = asyncio.run(confirm_item(repo, key, front, front, "Library", None, analysis(), "pocket", TEST_UNIT_ID))
     assert saved.item_id == duplicate.item_id and len(repo.uploaded) == 2
     repo = FakeRepo()
     repo.fail_upload_at = 2
     with pytest.raises(ServiceError, match="STORAGE_UPLOAD_FAILED"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket"))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket", TEST_UNIT_ID))
     assert len(repo.removed) == 1
     repo = FakeRepo()
     repo.fail_insert = True
     with pytest.raises(ServiceError, match="DATABASE_INSERT_FAILED"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket"))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket", TEST_UNIT_ID))
     assert len(repo.removed) == 2
     class CleanupFails(FakeRepo):
         async def remove(self, _paths):
@@ -327,7 +336,7 @@ def test_confirmation_idempotency_and_cleanup(caplog):
     repo = CleanupFails()
     repo.fail_upload_at = 2
     with pytest.raises(ServiceError, match="STORAGE_UPLOAD_FAILED"):
-        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket"))
+        asyncio.run(confirm_item(repo, uuid4(), front, front, "Library", None, analysis(), "pocket", TEST_UNIT_ID))
     assert "cleanup failed" in caplog.text.lower()
 
 

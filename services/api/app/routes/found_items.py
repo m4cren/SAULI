@@ -2,10 +2,13 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, File, Form, Header, Request, UploadFile
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from app.core.errors import ServiceError
+from app.auth.kiosk import get_kiosk_session
 from app.schemas.found_items import (AnalysisResponse, ConfirmedItemResponse, FoundItemDetailsResponse, SimulatePlacementRequest,
                                       ReconcileRequest, normalize_location_notes, strict_analysis_json)
 from app.services.analysis import analyze, reconcile, safe_analysis
@@ -13,6 +16,7 @@ from app.services.found_items import confirm_item, public_details
 from app.services.images import read_upload
 
 router = APIRouter(prefix="/api/found-items", tags=["found-items"])
+Kiosk = Annotated[dict, Depends(get_kiosk_session)]
 
 
 def location_notes(location: str, notes: str | None) -> tuple[str, str | None]:
@@ -43,7 +47,7 @@ async def exact_image_pair(request: Request) -> None:
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
-async def analyze_item(request: Request, front_image: UploadFile | None = File(None), back_image: UploadFile | None = File(None),
+async def analyze_item(request: Request, kiosk: Kiosk, front_image: UploadFile | None = File(None), back_image: UploadFile | None = File(None),
                        found_location: str = Form(""), notes: str | None = Form(None)):
     location, normalized_notes = location_notes(found_location, notes)
     await exact_image_pair(request)
@@ -54,12 +58,12 @@ async def analyze_item(request: Request, front_image: UploadFile | None = File(N
 
 
 @router.post("/reconcile-review", response_model=AnalysisResponse)
-async def reconcile_item(request: Request, payload: ReconcileRequest):
+async def reconcile_item(request: Request, payload: ReconcileRequest, kiosk: Kiosk):
     return await reconcile(request.app.state.ollama, request.app.state.settings.ollama_model, payload)
 
 
 @router.post("/confirm-and-store", response_model=ConfirmedItemResponse)
-async def confirm_and_store(request: Request, front_image: UploadFile | None = File(None), back_image: UploadFile | None = File(None),
+async def confirm_and_store(request: Request, kiosk: Kiosk, front_image: UploadFile | None = File(None), back_image: UploadFile | None = File(None),
                             found_location: str = Form(""), notes: str | None = Form(None), analysis_json: str = Form(""),
                             storage_size: str = Form(""),
                             x_idempotency_key: str | None = Header(None)):
@@ -67,6 +71,8 @@ async def confirm_and_store(request: Request, front_image: UploadFile | None = F
     location, normalized_notes = location_notes(found_location, notes)
     existing = await request.app.state.items.find_by_key(key)
     if existing:
+        if str(existing.get("unit_id")) != kiosk["unit_id"]:
+            raise ServiceError("CROSS_UNIT_ITEM", "This item belongs to another SAULI unit.", 403)
         from app.services.found_items import confirmed
         slot = await request.app.state.items.get_slot_for_item(UUID(str(existing["id"])))
         if not slot:
@@ -80,13 +86,13 @@ async def confirm_and_store(request: Request, front_image: UploadFile | None = F
         analysis = safe_analysis(strict_analysis_json(analysis_json))
     except (ValueError, TypeError) as exc:
         raise ServiceError("INVALID_ANALYSIS", "The item analysis is incomplete or invalid. Please analyze it again.", 422) from exc
-    return await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis, storage_size)
+    return await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis, storage_size, UUID(kiosk["unit_id"]))
 
 
 @router.post("/{item_id}/simulate-placement", response_model=ConfirmedItemResponse)
-async def simulate_placement(request: Request, item_id: UUID, payload: SimulatePlacementRequest):
+async def simulate_placement(request: Request, item_id: UUID, payload: SimulatePlacementRequest, kiosk: Kiosk):
     from app.services.found_items import confirmed
-    result = await request.app.state.items.simulate_placement(item_id, payload.slot_code)
+    result = await request.app.state.items.simulate_placement(item_id, payload.slot_code, UUID(kiosk["unit_id"]))
     return confirmed(result["item"], result["slot"])
 
 

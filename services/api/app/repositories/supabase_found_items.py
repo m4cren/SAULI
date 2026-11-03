@@ -54,7 +54,7 @@ class SupabaseFoundItemRepository:
     async def find_by_key(self, key: UUID) -> dict | None:
         try:
             client = self.require()
-            response = await run_in_threadpool(lambda: client.table("found_items").select("id,status,storage_size,placement_status,extraction_summary,found_location,found_at").eq("idempotency_key", str(key)).maybe_single().execute())
+            response = await run_in_threadpool(lambda: client.table("found_items").select("id,unit_id,status,storage_size,placement_status,extraction_summary,found_location,found_at").eq("idempotency_key", str(key)).maybe_single().execute())
             return response.data if response is not None else None
         except ServiceError:
             raise
@@ -73,10 +73,10 @@ class SupabaseFoundItemRepository:
             log.exception("Found item database insert failed")
             raise ServiceError("DATABASE_INSERT_FAILED", "The item could not be saved. Please try again.", 503) from exc
 
-    async def reserve_item(self, row: dict, size: str) -> dict:
+    async def reserve_item(self, row: dict, size: str, unit_id: UUID) -> dict:
         try:
             client = self.require()
-            result = await run_in_threadpool(lambda: client.rpc("reserve_sauli_storage_slot", {"p_item": row, "p_size": size}).execute())
+            result = await run_in_threadpool(lambda: client.rpc("reserve_sauli_storage_slot", {"p_item": row, "p_size": size, "p_unit_id": str(unit_id)}).execute())
             return result.data
         except Exception as exc:
             if "NO_AVAILABLE_STORAGE_SLOT" in str(exc):
@@ -87,11 +87,11 @@ class SupabaseFoundItemRepository:
             log.exception("Atomic storage assignment failed")
             raise ServiceError("DATABASE_INSERT_FAILED", "The item could not be assigned. Please try again.", 503) from exc
 
-    async def simulate_placement(self, item_id: UUID, slot_code: str) -> dict:
+    async def simulate_placement(self, item_id: UUID, slot_code: str, unit_id: UUID) -> dict:
         try:
             client = self.require()
             result = await run_in_threadpool(lambda: client.rpc("simulate_sauli_placement", {
-                "p_item_id": str(item_id), "p_slot_code": slot_code}).execute())
+                "p_item_id": str(item_id), "p_slot_code": slot_code, "p_unit_id": str(unit_id)}).execute())
             return result.data
         except Exception as exc:
             if "SLOT_RESERVATION_MISMATCH" in str(exc):
@@ -108,7 +108,7 @@ class SupabaseFoundItemRepository:
             log.exception("Item slot lookup failed")
             raise ServiceError("SUPABASE_UNAVAILABLE", "Storage position is unavailable. Please try again.", 503) from exc
 
-    async def list_slots(self, include_items: bool = False) -> list[dict]:
+    async def list_slots(self, include_items: bool = False, unit_id: UUID | None = None) -> list[dict]:
         client = self.require()
         try:
             def fetch():
@@ -117,9 +117,12 @@ class SupabaseFoundItemRepository:
                 # two queries are reads, so a brief transport retry is safe.
                 for attempt in range(3):
                     try:
-                        result = client.table("storage_slots").select("*").execute()
+                        query = client.table("storage_slots").select("*")
+                        if unit_id is not None:
+                            query = query.eq("unit_id", str(unit_id))
+                        result = query.execute()
                         rows = result.data or []
-                        rows.sort(key=lambda row: (0 if row["size_class"] == "pocket" else 1, row["ordinal"]))
+                        rows.sort(key=lambda row: (row.get("unit_id", ""), 0 if row["size_class"] == "pocket" else 1, row["ordinal"]))
                         if include_items:
                             ids = [row["current_found_item_id"] for row in rows if row.get("current_found_item_id")]
                             summaries = {}
@@ -418,18 +421,37 @@ class SupabaseFoundItemRepository:
             log.exception("Retrieval live status lookup failed")
             raise ServiceError("RETRIEVAL_UNAVAILABLE", "Retrieval status is unavailable. Please try again.", 503) from exc
 
+    async def retrieval_unit(self, session_id: UUID, user_id: UUID) -> dict | None:
+        """Expose only the verified claimant's station location, never its slot."""
+        def fetch():
+            client = self.require()
+            sessions = (client.table("retrieval_sessions").select("found_item_id")
+                .eq("id", str(session_id)).eq("claimant_user_id", str(user_id))
+                .limit(1).execute().data or [])
+            if not sessions:
+                return None
+            items = (client.table("found_items").select("unit_id")
+                .eq("id", sessions[0]["found_item_id"]).limit(1).execute().data or [])
+            if not items:
+                return None
+            units = (client.table("sauli_units")
+                .select("unit_code,display_name,campus_name,building_name,floor,location_description")
+                .eq("id", items[0]["unit_id"]).limit(1).execute().data or [])
+            return units[0] if units else None
+        return await run_in_threadpool(fetch)
+
     async def replace_retrieval(self, session_id: UUID, user_id: UUID, digest: str,
                                 ttl_minutes: int) -> dict:
         return await self.retrieval_rpc("sauli_replace_retrieval", {"p_session_id": str(session_id),
             "p_user_id": str(user_id), "p_token_hash": digest, "p_ttl_minutes": ttl_minutes})
 
-    async def validate_retrieval(self, digest: str, action_digest: str) -> dict:
-        return await self.retrieval_rpc("sauli_validate_retrieval", {"p_token_hash": digest,
-            "p_action_hash": action_digest})
+    async def validate_retrieval(self, digest: str, action_digest: str, unit_id: UUID) -> dict:
+        return await self.retrieval_rpc("sauli_validate_unit_retrieval", {"p_token_hash": digest,
+            "p_action_hash": action_digest, "p_unit_id": str(unit_id)})
 
-    async def simulate_retrieval(self, session_id: UUID, action_digest: str, event: str) -> dict:
-        return await self.retrieval_rpc("sauli_simulate_retrieval", {"p_session_id": str(session_id),
-            "p_action_hash": action_digest, "p_event": event})
+    async def simulate_retrieval(self, session_id: UUID, action_digest: str, event: str, unit_id: UUID) -> dict:
+        return await self.retrieval_rpc("sauli_simulate_unit_retrieval", {"p_session_id": str(session_id),
+            "p_action_hash": action_digest, "p_event": event, "p_unit_id": str(unit_id)})
 
     async def retrieval_logs(self, claimant_user_id: UUID | None = None) -> list[dict]:
         try:

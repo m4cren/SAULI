@@ -22,7 +22,7 @@ def timestamp(value: str | None) -> datetime | None:
 
 def slot_response(row: dict) -> StorageSlotResponse:
     return StorageSlotResponse(
-        id=UUID(str(row["id"])), code=row["code"], size_class=row["size_class"],
+        id=UUID(str(row["id"])), unit_id=UUID(str(row["unit_id"])), code=row["code"], size_class=row["size_class"],
         ordinal=row["ordinal"], status=row["status"], is_active=is_active_slot(row),
         current_found_item_id=UUID(str(row["current_found_item_id"])) if row.get("current_found_item_id") else None,
         item_summary=row.get("item_summary"), reserved_at=timestamp(row.get("reserved_at")),

@@ -7,6 +7,7 @@ import AdminIcon from "./AdminIcon";
 
 const links = [
   { href: "/admin", label: "Container Status", icon: "grid" },
+  { href: "/admin/units", label: "SAULI Units", icon: "box" },
   { href: "/admin/retrieval-logs", label: "Retrieval Logs", icon: "logs" },
   { href: "/admin/cctv-footage", label: "CCTV Footage", icon: "camera" },
 ] as const;

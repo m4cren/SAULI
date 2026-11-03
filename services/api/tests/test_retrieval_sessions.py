@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 from app.auth.dependencies import get_current_user
 from app.config import Settings
 from app.core.errors import ServiceError
-from app.main import create_app
+from app.main import create_app as create_application
+from app.auth.kiosk import get_kiosk_session
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.schemas.auth import UserResponse
 from app.services.retrieval_sessions import issue, replace, simulate, validate
@@ -30,6 +31,13 @@ RESOLVED_REPORT_MIGRATION = (
     Path(__file__).resolve().parents[3]
     / "supabase/migrations/202610140001_sauli_resolve_retrieved_reports.sql"
 )
+TEST_UNIT_ID = uuid4()
+
+
+def create_app(settings):
+    app = create_application(settings)
+    app.dependency_overrides[get_kiosk_session] = lambda: {"id": str(uuid4()), "unit_id": str(TEST_UNIT_ID)}
+    return app
 
 
 class RetrievalRepo:
@@ -119,7 +127,8 @@ class RetrievalRepo:
             for key in ("id", "status", "issued_at", "expires_at", "item_summary")
         }
 
-    async def validate_retrieval(self, digest, action_hash):
+    async def validate_retrieval(self, digest, action_hash, unit_id):
+        assert unit_id == TEST_UNIT_ID
         row = next(
             (item for item in self.sessions.values() if item["token_hash"] == digest),
             None,
@@ -154,7 +163,8 @@ class RetrievalRepo:
             "slot_status": self.slot_status,
         }
 
-    async def simulate_retrieval(self, session_id, digest, event):
+    async def simulate_retrieval(self, session_id, digest, event, unit_id):
+        assert unit_id == TEST_UNIT_ID
         row = self.sessions[str(session_id)]
         if digest != row["action_hash"]:
             return {"error": "INVALID_RETRIEVAL_ACTION"}
@@ -244,14 +254,14 @@ def test_bad_format_unknown_expired_replaced_and_used_qr():
     with pytest.raises(ServiceError, match="INVALID_QR_FORMAT"):
         parse_qr_payload("https://example.com/not-sauli")
     with pytest.raises(ServiceError, match="INVALID_RETRIEVAL_TOKEN"):
-        asyncio.run(validate(repo, settings, QR_PREFIX + "A" * 43))
+        asyncio.run(validate(repo, settings, QR_PREFIX + "A" * 43, TEST_UNIT_ID))
     issued = asyncio.run(issue(repo, settings, uuid4(), uuid4(), None))
     session_id = issued["id"]
     repo.sessions[session_id]["expires_at"] = (
         datetime.now(UTC) - timedelta(seconds=1)
     ).isoformat()
     with pytest.raises(ServiceError, match="RETRIEVAL_QR_EXPIRED"):
-        asyncio.run(validate(repo, settings, issued["qr_payload"]))
+        asyncio.run(validate(repo, settings, issued["qr_payload"], TEST_UNIT_ID))
     replacement = asyncio.run(
         replace(
             repo, settings, UUID(session_id), UUID(repo.sessions[session_id]["user_id"])
@@ -259,11 +269,11 @@ def test_bad_format_unknown_expired_replaced_and_used_qr():
     )
     assert replacement["raw_token"] != issued["raw_token"]
     with pytest.raises(ServiceError, match="INVALID_RETRIEVAL_TOKEN"):
-        asyncio.run(validate(repo, settings, issued["qr_payload"]))
-    accepted = asyncio.run(validate(repo, settings, replacement["qr_payload"]))
+        asyncio.run(validate(repo, settings, issued["qr_payload"], TEST_UNIT_ID))
+    accepted = asyncio.run(validate(repo, settings, replacement["qr_payload"], TEST_UNIT_ID))
     assert accepted["slot_code"] == "M-04"
     with pytest.raises(ServiceError, match="RETRIEVAL_QR_ALREADY_USED"):
-        asyncio.run(validate(repo, settings, replacement["qr_payload"]))
+        asyncio.run(validate(repo, settings, replacement["qr_payload"], TEST_UNIT_ID))
 
 
 def test_qr_rejects_unavailable_item_and_mismatched_slot():
@@ -272,37 +282,37 @@ def test_qr_rejects_unavailable_item_and_mismatched_slot():
     issued = asyncio.run(issue(repo, settings, uuid4(), uuid4(), None))
     repo.item_status = "archived"
     with pytest.raises(ServiceError, match="ITEM_NOT_AVAILABLE"):
-        asyncio.run(validate(repo, settings, issued["qr_payload"]))
+        asyncio.run(validate(repo, settings, issued["qr_payload"], TEST_UNIT_ID))
     repo.item_status = "claimed"
     repo.slot_status = "available"
     with pytest.raises(ServiceError, match="STORAGE_POSITION_MISMATCH"):
-        asyncio.run(validate(repo, settings, issued["qr_payload"]))
+        asyncio.run(validate(repo, settings, issued["qr_payload"], TEST_UNIT_ID))
 
 
 def test_simulated_wrong_return_and_correct_removal_are_idempotent():
     repo = RetrievalRepo()
     settings = Settings(retrieval_token_pepper="a" * 48)
     issued = asyncio.run(issue(repo, settings, uuid4(), uuid4(), None))
-    accepted = asyncio.run(validate(repo, settings, issued["qr_payload"]))
+    accepted = asyncio.run(validate(repo, settings, issued["qr_payload"], TEST_UNIT_ID))
     session_id = UUID(accepted["id"])
     action = accepted["action_token"]
     with pytest.raises(ServiceError, match="INVALID_RETRIEVAL_ACTION"):
         asyncio.run(
-            simulate(repo, settings, session_id, "A" * 43, "correct_item_lifted")
+            simulate(repo, settings, session_id, "A" * 43, "correct_item_lifted", TEST_UNIT_ID)
         )
-    asyncio.run(simulate(repo, settings, session_id, action, "wrong_item_lifted"))
-    asyncio.run(simulate(repo, settings, session_id, action, "wrong_item_lifted"))
+    asyncio.run(simulate(repo, settings, session_id, action, "wrong_item_lifted", TEST_UNIT_ID))
+    asyncio.run(simulate(repo, settings, session_id, action, "wrong_item_lifted", TEST_UNIT_ID))
     with pytest.raises(ServiceError, match="WRONG_ITEM_NOT_RETURNED"):
-        asyncio.run(simulate(repo, settings, session_id, action, "correct_item_lifted"))
+        asyncio.run(simulate(repo, settings, session_id, action, "correct_item_lifted", TEST_UNIT_ID))
     assert repo.item_status == "claimed" and repo.slot_status == "occupied"
-    asyncio.run(simulate(repo, settings, session_id, action, "item_returned"))
-    asyncio.run(simulate(repo, settings, session_id, action, "item_returned"))
+    asyncio.run(simulate(repo, settings, session_id, action, "item_returned", TEST_UNIT_ID))
+    asyncio.run(simulate(repo, settings, session_id, action, "item_returned", TEST_UNIT_ID))
     assert repo.item_status == "claimed" and repo.slot_status == "occupied"
     completed = asyncio.run(
-        simulate(repo, settings, session_id, action, "correct_item_lifted")
+        simulate(repo, settings, session_id, action, "correct_item_lifted", TEST_UNIT_ID)
     )
     again = asyncio.run(
-        simulate(repo, settings, session_id, action, "correct_item_lifted")
+        simulate(repo, settings, session_id, action, "correct_item_lifted", TEST_UNIT_ID)
     )
     assert (
         completed["id"] == again["id"]

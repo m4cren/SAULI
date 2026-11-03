@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 
 from app.auth.dependencies import get_admin_user
+from app.auth.kiosk import get_kiosk_session
 from app.schemas.auth import UserResponse
 from app.schemas.storage_slots import AvailabilityResponse, SizeClass, StorageSlotImagesResponse, StorageSlotResponse
 from app.services.storage_slots import availability, item_images, slot_response
@@ -14,13 +15,14 @@ router = APIRouter(prefix="/api/storage-slots", tags=["storage-slots"])
 
 
 @router.get("/availability", response_model=AvailabilityResponse)
-async def get_availability(request: Request, size_class: SizeClass):
-    return availability(await request.app.state.items.list_slots(), size_class)
+async def get_availability(request: Request, size_class: SizeClass,
+                           kiosk: Annotated[dict, Depends(get_kiosk_session)]):
+    return availability(await request.app.state.items.list_slots(unit_id=UUID(kiosk["unit_id"])), size_class)
 
 
 @router.get("", response_model=list[StorageSlotResponse])
-async def list_storage_slots(request: Request, _admin: Annotated[UserResponse, Depends(get_admin_user)]):
-    rows = await request.app.state.items.list_slots(include_items=True)
+async def list_storage_slots(request: Request, _admin: Annotated[UserResponse, Depends(get_admin_user)], unit_id: UUID | None = None):
+    rows = await request.app.state.items.list_slots(include_items=True, unit_id=unit_id)
     return [slot_response(row) for row in rows]
 
 

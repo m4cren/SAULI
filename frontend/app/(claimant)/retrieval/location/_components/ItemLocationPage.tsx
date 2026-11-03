@@ -42,6 +42,11 @@ export default function ItemLocationPage() {
       icon={<div className="mx-auto flex size-18 items-center justify-center rounded-full bg-[#dff9f4] text-[#0d9d98] shadow-[0_0_22px_rgba(31,214,195,0.45)]"><Icon name="check" size={44} /></div>}
     />
     <main className="client-content client-overlap pb-8">
+      {session.unit && <section className="client-card mb-4 p-4" aria-label="SAULI station location">
+        <p className="text-xs font-bold uppercase tracking-[0.08em] text-[#116c78]">Your SAULI station</p>
+        <p className="mt-1 font-semibold text-[#092f37]">{session.unit.display_name || session.unit.unit_code}</p>
+        <p className="mt-1 text-sm text-[#526570]">{[session.unit.campus_name, session.unit.building_name, session.unit.floor, session.unit.location_description].filter(Boolean).join(" · ")}</p>
+      </section>}
       <section className="client-card border-[#d6eff0] p-5 text-center shadow-[0_12px_28px_rgba(5,81,86,0.08)]">
         <p className="text-xs font-bold uppercase tracking-[0.08em] text-[#116c78]">{section} section</p>
         <p className="mt-1 text-6xl font-bold tracking-[-0.05em] text-[#101e2a]">{session.slotCode}</p>

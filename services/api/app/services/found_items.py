@@ -29,13 +29,15 @@ def normalized_search_document(analysis: FoundItemAnalysis, location: str, notes
 
 
 async def confirm_item(repo, key: UUID, front: ImageData, back: ImageData, location: str, notes: str | None,
-                       analysis: FoundItemAnalysis, storage_size: str) -> ConfirmedItemResponse:
+                       analysis: FoundItemAnalysis, storage_size: str, unit_id: UUID) -> ConfirmedItemResponse:
     if not analysis.views_consistent:
         raise ServiceError("VIEW_MISMATCH", "Retake the photos before storing this item.", 422)
     if storage_size not in ("pocket", "medium"):
         raise ServiceError("INVALID_STORAGE_SIZE", "Choose pocket-size or medium-size storage before confirming.", 422)
     prior = await repo.find_by_key(key)
     if prior:
+        if str(prior.get("unit_id")) != str(unit_id):
+            raise ServiceError("CROSS_UNIT_ITEM", "This item belongs to another SAULI unit.", 403)
         slot = await repo.get_slot_for_item(UUID(str(prior["id"])))
         if not slot:
             raise ServiceError("STORAGE_STATE_CONFLICT", "The assigned position is unavailable. Please try again.", 409)
@@ -66,12 +68,14 @@ async def confirm_item(repo, key: UUID, front: ImageData, back: ImageData, locat
             "search_document": normalized_search_document(analysis, location, notes),
             "front_image_path": front_path, "back_image_path": back_path,
         }
-        assigned = await repo.reserve_item(row, storage_size)
+        assigned = await repo.reserve_item(row, storage_size, unit_id)
         return confirmed(assigned["item"], assigned["slot"])
     except Exception as exc:
         if isinstance(exc, ServiceError) and exc.code == "DATABASE_INSERT_FAILED":
             prior = await repo.find_by_key(key)
             if prior:
+                if str(prior.get("unit_id")) != str(unit_id):
+                    raise ServiceError("CROSS_UNIT_ITEM", "This item belongs to another SAULI unit.", 403)
                 slot = await repo.get_slot_for_item(UUID(str(prior["id"])))
                 if slot:
                     return confirmed(prior, slot)
