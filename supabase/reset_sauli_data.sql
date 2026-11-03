@@ -16,10 +16,12 @@ set local lock_timeout = '10s';
 do $$
 declare v_scope text := current_setting('app.sauli_reset_unit_code', true);
 begin
-  if (select environment from public.sauli_deployment_guard where id = 1) <> 'development'
-    or current_setting('app.sauli_reset_confirmation', true) <> 'RESET DEVELOPMENT DATA'
+  if (select environment from public.sauli_deployment_guard where id = 1) is distinct from 'development' then
+    raise exception 'SAULI_RESET_DEVELOPMENT_ONLY: use the reviewed production procedure for live data';
+  end if;
+  if current_setting('app.sauli_reset_confirmation', true) <> 'RESET DEVELOPMENT DATA'
     or v_scope is null or v_scope = '' then
-    raise exception 'SAULI_RESET_DENIED';
+    raise exception 'SAULI_RESET_CONFIRMATION_REQUIRED';
   end if;
   if v_scope <> 'ALL' and not exists
     (select 1 from public.sauli_units where unit_code = v_scope) then
@@ -74,7 +76,8 @@ update public.storage_slots set status = case when status = 'out_of_service'
     then 'out_of_service' else 'available' end, current_found_item_id = null,
   reserved_at = null, occupied_at = null
 where id in (select id from sauli_reset_slots)
-  and current_found_item_id in (select id from sauli_reset_items);
+  and (current_found_item_id is not null or status in ('reserved','occupied')
+    or reserved_at is not null or occupied_at is not null);
 -- Preserve out-of-service maintenance flags and inactive legacy positions.
 delete from public.found_items where id in (select id from sauli_reset_items);
 

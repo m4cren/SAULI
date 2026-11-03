@@ -13,6 +13,8 @@ from app.services.retrieval_tokens import new_token, qr_payload
 
 MIGRATION = Path(__file__).resolve().parents[3] / "supabase/migrations/202611020001_sauli_multi_unit_foundation.sql"
 RESET = Path(__file__).resolve().parents[3] / "supabase/reset_sauli_data.sql"
+PRODUCTION_RESET = Path(__file__).resolve().parents[3] / "supabase/production_reset_sauli_data.sql"
+PRODUCTION_PREFLIGHT = Path(__file__).resolve().parents[3] / "supabase/production_reset_preflight.sql"
 
 
 def test_multi_unit_migration_has_transactional_isolation_guards():
@@ -38,6 +40,22 @@ def test_reset_is_guarded_and_preserves_registration():
     assert "development" in sql
     assert "delete from public.sauli_units" not in sql
     assert "delete from public.kiosk_devices" not in sql
+    assert "delete from storage.objects" not in sql
+
+
+def test_production_reset_requires_preflight_and_preserves_identity():
+    preflight = PRODUCTION_PREFLIGHT.read_text(encoding="utf-8").lower()
+    sql = PRODUCTION_RESET.read_text(encoding="utf-8").lower()
+    assert "delete from" not in preflight and "update public." not in preflight
+    assert "v_confirmation text := 'replace_with_confirmation'" in sql
+    assert "reset all sauli production data" in sql
+    assert "sauli_production_reset_counts_changed" in sql
+    assert "v_expected_nonempty_slots" in sql
+    assert "begin;" in sql and "commit;" in sql
+    for table in ("sauli_units", "kiosk_devices", "kiosk_device_credentials",
+                  "kiosk_browser_sessions", "sauli_deployment_guard"):
+        assert f"delete from public.{table}" not in sql
+        assert f"update public.{table}" not in sql
     assert "delete from storage.objects" not in sql
 
 
