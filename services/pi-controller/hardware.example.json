@@ -1,0 +1,17 @@
+{
+  "mode": "simulation",
+  "device_id": "REPLACE-WITH-REGISTERED-DEVICE-UUID",
+  "reed_closed_level": {"medium": 0, "pocket": 0},
+  "output_active_high": {
+    "main_light": true, "buzzer": true,
+    "medium_solenoid": true, "pocket_solenoid": true,
+    "pocket_light_gate": true, "medium_light_gate": true
+  },
+  "solenoid_pulse_seconds": 0.35,
+  "door_open_timeout_seconds": 5,
+  "door_close_timeout_seconds": 30,
+  "enable_actuators": false,
+  "output_polarity_verified": false,
+  "esp_port": "/dev/serial0",
+  "esp_baud": 115200
+}

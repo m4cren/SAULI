@@ -13,7 +13,7 @@ from app.core.errors import ServiceError
 from app.integrations.ollama import OllamaGateway
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.repositories.supabase_kiosks import SupabaseKioskRepository
-from app.routes import found_items, health, kiosk_devices, matches, me, missing_reports, ollama, retrieval_sessions, storage_slots, units
+from app.routes import found_items, hardware, health, kiosk_devices, matches, me, missing_reports, ollama, retrieval_sessions, storage_slots, units
 from app.services.email_notifications import EmailJSClient, run_worker
 
 log = logging.getLogger("sauli.api")
@@ -77,6 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(retrieval_sessions.router)
     app.include_router(units.router)
     app.include_router(kiosk_devices.router)
+    app.include_router(hardware.router)
     return app
 
 

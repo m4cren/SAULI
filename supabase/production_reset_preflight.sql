@@ -26,6 +26,8 @@ select
   (select count(*) from public.retrieval_events) as retrieval_events,
   (select count(*) from public.retrieval_logs) as retrieval_logs,
   (select count(*) from public.email_notifications) as email_notifications,
+  (select count(*) from public.sauli_hardware_snapshots) as hardware_snapshots,
+  (select count(*) from public.sauli_hardware_commands) as hardware_commands,
   (select coalesce(jsonb_agg(jsonb_build_object(
       'unit',u.unit_code, 'position',s.code, 'status',s.status,
       'active',s.is_active, 'found_item_id',s.current_found_item_id)

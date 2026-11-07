@@ -7,6 +7,11 @@ name = "sauli-pi-controller"
 version = "0.1.0"
 description = "Registered SAULI kiosk device bootstrap and heartbeat"
 requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1", "pyserial>=3.5,<4"]
+
+[project.optional-dependencies]
+pi = ["gpiozero>=2,<3", "lgpio>=0.2,<1"]
+test = ["pytest>=8,<10", "httpx>=0.28,<1"]
 
 [project.scripts]
 sauli-pi = "sauli_pi.main:main"

@@ -1,0 +1,17 @@
+[Unit]
+Description=SAULI Pi hardware owner and local diagnostics
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sauli
+Group=sauli
+WorkingDirectory=/opt/sauli/pi-controller
+ExecStart=/opt/sauli/pi-controller/.venv/bin/python -m sauli_pi.hardware_service --config /etc/sauli/controller.json --hardware /etc/sauli/hardware.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

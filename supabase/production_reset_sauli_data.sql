@@ -16,6 +16,7 @@
 begin;
 set local lock_timeout = '10s';
 lock table public.sauli_deployment_guard, public.sauli_units,
+  public.sauli_hardware_snapshots, public.sauli_hardware_commands,
   public.found_items, public.storage_slots, public.storage_slot_events,
   public.match_candidates, public.retrieval_sessions, public.retrieval_events,
   public.retrieval_logs, public.matching_jobs, public.email_notifications,
@@ -58,6 +59,8 @@ begin
 end $$;
 
 -- Delete dependents before their referenced items, reports and searches.
+delete from public.sauli_hardware_commands;
+delete from public.sauli_hardware_snapshots;
 delete from public.email_notifications;
 delete from public.retrieval_events;
 delete from public.retrieval_logs;
@@ -84,6 +87,8 @@ update public.sauli_email_dispatch_clock set next_allowed_at = now() where id = 
 
 do $$ begin
   if exists (select 1 from public.found_items)
+    or exists (select 1 from public.sauli_hardware_commands)
+    or exists (select 1 from public.sauli_hardware_snapshots)
     or exists (select 1 from public.missing_reports)
     or exists (select 1 from public.search_requests)
     or exists (select 1 from public.match_candidates)

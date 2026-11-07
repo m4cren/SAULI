@@ -180,3 +180,71 @@ class SupabaseKioskRepository:
         await run_in_threadpool(lambda: self.client().table("kiosk_devices")
             .update({"last_seen_at": datetime.now(UTC).isoformat(),
                      "controller_version": version}).eq("id", device["id"]).execute())
+
+    async def hardware_heartbeat(self, device: dict, snapshot: dict) -> None:
+        now = datetime.now(UTC).isoformat()
+        await run_in_threadpool(lambda: self.client().table("sauli_hardware_snapshots")
+            .upsert({"device_id": device["id"], "unit_id": device["unit_id"],
+                     "snapshot": snapshot, "received_at": now}, on_conflict="device_id").execute())
+
+    async def claim_hardware_commands(self, device: dict) -> list[dict]:
+        rows = await self.rpc("sauli_claim_hardware_commands", {
+            "p_device_id": device["id"], "p_unit_id": device["unit_id"]})
+        return [{"id": row["id"], "device_id": row["device_id"],
+                 "action": row["action"], "expires_at": row["expires_at"]}
+                for row in (rows or [])]
+
+    async def ack_hardware_command(self, device: dict, command_id: str,
+                                   status: str, code: str) -> bool:
+        rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_commands")
+            .update({"status": status, "result_code": code,
+                     "acknowledged_at": datetime.now(UTC).isoformat()})
+            .eq("id", command_id).eq("device_id", device["id"])
+            .eq("unit_id", device["unit_id"]).eq("status", "claimed")
+            .select("id").execute().data or [])
+        return bool(rows)
+
+    async def enqueue_hardware_test(self, device_id: str, action: str) -> dict:
+        device = await run_in_threadpool(lambda: self._active_device(device_id))
+        if device is None:
+            raise ServiceError("DEVICE_ACCESS_DENIED", "Device is not active.", 403)
+        expires = datetime.now(UTC) + timedelta(seconds=10)
+        rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_commands")
+            .insert({"device_id": device["id"], "unit_id": device["unit_id"],
+                     "action": action, "expires_at": expires.isoformat()})
+            .select("id,status,expires_at").execute().data or [])
+        return rows[0]
+
+    async def public_hardware_status(self) -> dict:
+        rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_snapshots")
+            .select("device_id,unit_id,snapshot,received_at").order("received_at", desc=True)
+            .limit(50).execute().data or [])
+        units = await self.locations()
+        labels = {unit["id"]: unit["display_name"] for unit in units}
+        devices = await self.devices()
+        active_devices = {device["id"] for device in devices
+                          if device["status"] == "active" and not device["revoked_at"]}
+        now = datetime.now(UTC)
+        result = []
+        for row in rows:
+            if row["unit_id"] not in labels or row["device_id"] not in active_devices:
+                continue
+            snapshot = row.get("snapshot") or {}
+            received = datetime.fromisoformat(row["received_at"].replace("Z", "+00:00"))
+            age = (now - received).total_seconds()
+            pi = snapshot.get("pi") or {}
+            esp = snapshot.get("esp") or {}
+            telemetry = esp.get("telemetry") or {}
+            result.append({
+                "unit_name": labels[row["unit_id"]],
+                "received_at": row["received_at"],
+                "connection": "online" if age <= 10 else "stale" if age <= 30 else "offline",
+                "doors": pi.get("doors", {}), "outputs": pi.get("outputs", {}),
+                "lock_feedback": "unavailable",
+                "door_workflow": snapshot.get("door_workflow", {}),
+                "esp": {"connection": esp.get("connection", "offline"),
+                        "frame_errors": esp.get("frame_errors", 0),
+                        "error": esp.get("error"), "slots": telemetry.get("slots", [])},
+                "events": snapshot.get("events", [])[:10],
+            })
+        return {"units": result}

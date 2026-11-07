@@ -30,6 +30,7 @@ begin
 end $$;
 
 lock table public.found_items, public.storage_slots, public.storage_slot_events,
+  public.sauli_hardware_snapshots, public.sauli_hardware_commands,
   public.match_candidates, public.retrieval_sessions, public.retrieval_events,
   public.retrieval_logs, public.matching_jobs, public.email_notifications,
   public.missing_reports, public.search_requests, public.sauli_email_dispatch_clock,
@@ -47,6 +48,13 @@ select s.id from public.storage_slots s
 join public.sauli_units u on u.id = s.unit_id
 where current_setting('app.sauli_reset_unit_code') = 'ALL'
   or u.unit_code = current_setting('app.sauli_reset_unit_code');
+
+delete from public.sauli_hardware_commands where unit_id in
+  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
+   or unit_code = current_setting('app.sauli_reset_unit_code'));
+delete from public.sauli_hardware_snapshots where unit_id in
+  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
+   or unit_code = current_setting('app.sauli_reset_unit_code'));
 
 create temporary table sauli_reset_candidates on commit drop as
 select id, search_request_id from public.match_candidates

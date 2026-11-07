@@ -1,6 +1,6 @@
 # SAULI initial backend integration
 
-The kiosk analyzes two item photos with Ollama. After review and an explicit storage-size choice, FastAPI saves the item and atomically reserves a Supabase position. A web-only placement action marks that position occupied. Claimant search considers only placed items in occupied positions. Claimant confirmation issues a QR; kiosk validation reveals the database position and web simulation records retrieval. The admin container view polls the same slot table. Physical doors and sensors remain outside this phase.
+The kiosk analyzes two item photos with Ollama. After review and an explicit storage-size choice, FastAPI saves the item and atomically reserves a Supabase position. A web-only placement action marks that position occupied. Claimant search considers only placed items in occupied positions. Claimant confirmation issues a QR; kiosk validation reveals the database position and web simulation records retrieval. The admin container view polls the same slot table. The optional Pi/ESP diagnostics service reports physical input and sensor state separately; it does not yet drive the placement/retrieval database workflow.
 
 ## Structure
 
@@ -51,7 +51,7 @@ select size_class,is_active,status,count(*) from public.storage_slots group by s
 select code,size_class,is_active,status,current_found_item_id from public.storage_slots order by case size_class when 'pocket' then 0 else 1 end,ordinal;
 ```
 
-The Raspberry Pi controller currently has no defined per-position GPIO, HX711 channel, or 74HC595 output map. Confirm the 8 pocket and 4 medium sensor/light/output assignments with the final wiring plan before hardware integration; do not infer pins from the slot codes.
+The Pi/ESP hardware pin map and an input-only first test are documented in the root [instruction.md](../instruction.md). The ESP HX711 DOUT assignment covers 8 pocket and 4 medium positions, with a shared clock. The 74HC595 Q-bit-to-compartment mapping is still unverified and no light output is driven. Apply `supabase/migrations/202611070001_sauli_hardware_diagnostics.sql` before enabling the Pi hardware service. `HARDWARE_TEST_ENABLED=false` keeps admin test commands off. The public `/hardware-debug` page shows only sanitized backend telemetry; its simulation is browser-local.
 
 Start FastAPI from `services/api`:
 

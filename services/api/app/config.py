@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     frontend_base_url: str = "https://sauli-system.vercel.app"
     match_notification_min_score: float = Field(default=65, ge=0, le=100)
     environment: str = "development"
+    hardware_test_enabled: bool = False
 
     @model_validator(mode="after")
     def require_production_retrieval_pepper(self) -> "Settings":
