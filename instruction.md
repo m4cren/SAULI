@@ -4,21 +4,16 @@ These steps deploy the repository to a Raspberry Pi 4 running Raspberry Pi OS Li
 
 ## 1. Update code and backend schema
 
-Commit and push the tested changes from the development PC. On the Pi, use the existing clone if it already exists. Check for local edits before pulling:
+Commit and push the tested changes from the development PC. Your existing Pi checkout is `/home/sauli/sauli` (`~/sauli` when logged in as `sauli`). Check for local edits before pulling:
 
 ```bash
-cd /opt/sauli/SAULI
+cd /home/sauli/sauli
 git status --short
 git pull --ff-only origin main
+ls services/pi-controller firmware/esp32-weight
 ```
 
-For a fresh Pi, create a service user and clone once (skip these commands if SAULI is already installed):
-
-```bash
-id sauli || sudo useradd --create-home --shell /bin/bash sauli
-sudo install -d -o sauli -g sauli /opt/sauli
-sudo -u sauli git clone https://github.com/m4cren/SAULI.git /opt/sauli/SAULI
-```
+If `git status --short` shows local edits, handle those before pulling. If the final `ls` cannot find the new directories, confirm the development PC pushed this revision and the Pi is on the intended branch. Do not clone over the existing checkout.
 
 Apply `supabase/migrations/202611070001_sauli_hardware_diagnostics.sql` to the intended Supabase project, after prior migrations, using the SQL Editor or the established Supabase migration workflow. It adds device-scoped snapshots and one-time command claims. It does **not** wipe data. Verify `sauli_hardware_snapshots` and `sauli_hardware_commands` exist. Leave `HARDWARE_TEST_ENABLED=false` in the central FastAPI environment and restart that API so `/api/hardware/public` is available. Deploy the frontend revision to Vercel; the browser route is `/hardware-debug`. Keep the backend origin and device credential server-side.
 
@@ -29,9 +24,9 @@ Install OS GPIO and serial support. Keep the existing Chromium/labwc kiosk setup
 ```bash
 sudo apt update
 sudo apt install -y git python3-venv python3-pip python3-gpiozero python3-lgpio python3-serial
-sudo install -d -o sauli -g sauli /opt/sauli/pi-controller
-sudo -u sauli python3 -m venv --system-site-packages /opt/sauli/pi-controller/.venv
-sudo -u sauli /opt/sauli/pi-controller/.venv/bin/python -m pip install -e /opt/sauli/SAULI/services/pi-controller
+mkdir -p /home/sauli/.venvs
+python3 -m venv --system-site-packages /home/sauli/.venvs/sauli-pi-hardware
+/home/sauli/.venvs/sauli-pi-hardware/bin/python -m pip install -e /home/sauli/sauli/services/pi-controller
 sudo usermod -aG dialout,gpio sauli
 ```
 
@@ -41,19 +36,19 @@ Log out and back in after adding groups. If `python3-lgpio` is unavailable on th
 
 ```bash
 sudo systemctl stop sauli-pi-hardware.service  # only if this service is already installed
-cd /opt/sauli/SAULI/services/pi-controller
-/opt/sauli/pi-controller/.venv/bin/python scripts/check_reeds.py
+cd /home/sauli/sauli/services/pi-controller
+/home/sauli/.venvs/sauli-pi-hardware/bin/python scripts/check_reeds.py
 ```
 
 With the input unconnected, observe HIGH. Temporarily connect each input to GND and observe LOW, one at a time. Then test each magnet/contact. The script reports raw level and debounced changes and releases both pins on Ctrl+C. A busy-pin error means stop the owning service or resolve the SPI configuration; do not force GPIO ownership. Record whether the chosen contact reads LOW or HIGH when the door is actually closed. A closed reed contact does not prove a solenoid is locked.
 
 ## 3. Configure and start the Pi hardware service
 
-In the existing `/etc/sauli/controller.json`, verify the backend and frontend HTTPS origins, unit/device codes, and absolute credential path. Do not re-enroll or overwrite that credential. Find the registered device UUID using the admin fleet page or a read-only `kiosk_devices` lookup, and put it in `/etc/sauli/hardware.json`.
+If `/etc/sauli/controller.json` already exists, verify its backend and frontend HTTPS origins, unit/device codes, and absolute credential path. Do not re-enroll or overwrite an existing credential. If it does not exist, use `services/pi-controller/controller.example.json` as a starting point and follow the enrollment steps in `docs/multi-unit-rollout.md` before starting the hardware service. That older rollout guide uses `/opt/sauli` as an example; use `/home/sauli/sauli` and the Python environment from this guide on your Pi. Leave the existing kiosk service as installed. Find the registered device UUID using the admin fleet page or a read-only `kiosk_devices` lookup, and put it in `/etc/sauli/hardware.json`.
 
 ```bash
 sudo install -d -m 755 /etc/sauli
-sudo cp /opt/sauli/SAULI/services/pi-controller/hardware.example.json /etc/sauli/hardware.json
+sudo cp /home/sauli/sauli/services/pi-controller/hardware.example.json /etc/sauli/hardware.json
 sudo nano /etc/sauli/hardware.json
 ```
 
@@ -62,7 +57,7 @@ Set `mode` to `real`, set the exact enrolled `device_id`, and set `reed_closed_l
 Use `sudo raspi-config`: Interface Options → Serial Port → disable the login shell on serial, enable the serial hardware, then reboot. Cross Pi BCM14 TX/physical 8 to ESP RX GPIO44, Pi BCM15 RX/physical 10 to ESP TX GPIO43, and GND to GND. Both sides use 3.3 V TTL at 115200 8N1, not RS-232 levels. Confirm the actual ESP board's pin labels and any USB-to-UART bridge connection before wiring. Do not connect the Pi UART to a 5 V signal.
 
 ```bash
-sudo cp /opt/sauli/SAULI/services/pi-controller/sauli-pi-hardware.service /etc/systemd/system/
+sudo cp /home/sauli/sauli/services/pi-controller/sauli-pi-hardware.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sauli-pi-hardware.service
 systemctl status sauli-pi-hardware.service
@@ -110,6 +105,30 @@ Only after checking the MOSFET circuit, coil rating, output active levels, bank-
 An authorized test pulse requires the selected door's debounced reed state to be **closed**. The Pi records the command, pulse activation and deactivation, then waits up to `door_open_timeout_seconds` for the selected reed to show **open** and up to `door_close_timeout_seconds` for it to show **closed** again. The public diagnostics page shows this workflow and any timeout fault. The API command acknowledgment `pulse_completed` means only that the electrical pulse ended; inspect the later door workflow for observed movement. Neither observation proves the lock latched or an item was placed or removed.
 
 This milestone adds hardware telemetry and guarded test commands. The existing kiosk placement/retrieval screens still use their established database simulation actions; they do not automatically infer successful storage or retrieval from a load-cell reading. Do not claim live sensor-controlled retrieval until that workflow has been validated on the assembled cabinet.
+
+## Hardware telemetry latency update
+
+The hardware service samples the reed inputs every 50 ms independently of UART reads and backend requests. Changed state is uploaded with at least 150 ms between requests; a heartbeat is also sent every 500 ms on a healthy connection. Failed requests retry with exponential backoff up to 30 seconds. These are software defaults, not a guarantee of 500 ms end-to-end display latency. The debug page polls every 250 ms only while visible, with one request at a time and backoff on errors. Its sample sequence, Pi observation time, backend receipt time, and browser refresh time help identify delays. Compare times only after checking the Pi, PC, and browser clocks.
+
+Existing `/etc/sauli/hardware.json` files work without new keys. For an attended timing experiment, optional `gpio_sample_seconds` (0.02–0.2), `telemetry_interval_seconds` (0.25–30), and `telemetry_min_gap_seconds` (0.1–5) may be set there; the minimum gap must not exceed the interval. Keep the tested pocket reed `reed_closed_level` at `1` if magnet-near means HIGH on that installed contact. Do not change the unverified medium polarity or enable actuators as part of this update.
+
+After the backend revision is restarted on the development PC and the frontend revision is deployed to Vercel, update the Pi hardware service:
+
+```bash
+cd /home/sauli/sauli
+git status --short
+git branch --show-current
+# If status lists a local timing edit, review and preserve or reconcile it before pulling.
+git pull --ff-only origin main
+/home/sauli/.venvs/sauli-pi-hardware/bin/python -m pip install -e /home/sauli/sauli/services/pi-controller
+sudo systemctl restart sauli-pi-hardware.service
+sudo systemctl status sauli-pi-hardware.service --no-pager
+curl -fsS http://127.0.0.1:8765/health
+curl -fsS http://127.0.0.1:8765/state
+journalctl -u sauli-pi-hardware.service -n 50 --no-pager
+```
+
+Watch `/state` while moving the pocket magnet: its raw level and sequence should advance even if the ESP remains `serial_unavailable` or the backend is slow. Compare that observation with the backend `/api/hardware/public` receipt and the `/hardware-debug` live page. Use a stopwatch or synchronized clocks to measure actual end-to-end latency on the installed hardware. No database migration, firmware flash, device re-enrollment, or browser-service restart is needed for this software-only change.
 
 ## Pin reference
 

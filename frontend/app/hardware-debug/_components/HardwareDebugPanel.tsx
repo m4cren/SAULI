@@ -6,7 +6,7 @@ import styles from "./HardwareDebugPanel.module.css";
 type Connection = "online" | "stale" | "offline";
 type Slot = { code: string; ready?: boolean; grams?: number | null; present?: boolean | null; calibrated?: boolean; light_command?: boolean; fault?: string | null };
 type Unit = {
-  unit_name: string; received_at: string; connection: Connection;
+  unit_name: string; received_at: string; observed_at?: string | null; sequence?: number | null; connection: Connection;
   doors: Record<string, { raw_level: number | null; door: string }>;
   outputs: Record<string, boolean>; lock_feedback: string;
   esp: { connection: Connection; frame_errors: number; error: string | null; slots: Slot[] };
@@ -21,6 +21,7 @@ export default function HardwareDebugPanel() {
   const [selected, setSelected] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshedAt, setRefreshedAt] = useState<string | null>(null);
   const [simDoors, setSimDoors] = useState({ pocket: false, medium: false });
   const [simSlots, setSimSlots] = useState<Record<string, boolean>>({});
   const [simLights, setSimLights] = useState<Record<string, boolean>>({});
@@ -29,21 +30,65 @@ export default function HardwareDebugPanel() {
   const [events, setEvents] = useState<string[]>([]);
 
   useEffect(() => {
+    if (mode !== "live") return;
     let active = true;
+    let inFlight = false;
+    let refreshPending = false;
+    let retryDelay = 1000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+    const schedule = (delay: number) => {
+      if (timer) clearTimeout(timer);
+      if (active && !document.hidden) timer = setTimeout(() => { void load(); }, delay);
+    };
     const load = async () => {
+      if (!active || document.hidden) return;
+      if (inFlight) { refreshPending = true; return; }
+      inFlight = true;
+      const requestController = new AbortController();
+      controller = requestController;
+      let succeeded = false;
       try {
-        const response = await fetch("/api/hardware-debug", { cache: "no-store" });
+        const response = await fetch("/api/hardware-debug", { cache: "no-store", signal: requestController.signal });
         if (!response.ok) throw new Error();
         const data = await response.json();
-        if (active) { setUnits(data.units || []); setError(""); }
+        if (active && !requestController.signal.aborted && !document.hidden) {
+          setUnits(data.units || []);
+          setRefreshedAt(new Date().toISOString());
+          setError("");
+        }
+        succeeded = true;
+        retryDelay = 1000;
       } catch {
-        if (active) setError("Backend status is unavailable. Live controls are read-only.");
-      } finally { if (active) setLoading(false); }
+        if (active && !requestController.signal.aborted && !document.hidden) setError("Backend status is unavailable. Live controls are read-only.");
+      } finally {
+        inFlight = false;
+        if (controller === requestController) controller = undefined;
+        if (active) {
+          if (succeeded || !document.hidden) setLoading(false);
+          schedule(refreshPending ? 0 : succeeded ? 250 : retryDelay);
+          if (!succeeded) retryDelay = Math.min(retryDelay * 2, 10000);
+          refreshPending = false;
+        }
+      }
     };
+    const onVisibility = () => {
+      if (document.hidden) {
+        if (timer) clearTimeout(timer);
+        controller?.abort();
+      } else {
+        schedule(0);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     void load();
-    const timer = setInterval(() => { void load(); }, 3000);
-    return () => { active = false; clearInterval(timer); };
-  }, []);
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      controller?.abort();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [mode]);
 
   const unit = units[selected];
   const log = (message: string) => setEvents((old) => [`${new Date().toLocaleTimeString()}  ${message}`, ...old].slice(0, 8));
@@ -58,7 +103,7 @@ export default function HardwareDebugPanel() {
         <button aria-pressed={mode === "simulation"} onClick={() => setMode("simulation")}>Simulation</button>
         {mode === "live" && units.length > 1 && <select aria-label="SAULI unit" value={selected} onChange={(e) => setSelected(Number(e.target.value))}>{units.map((row, i) => <option key={i} value={i}>{row.unit_name}</option>)}</select>}
       </div>
-      {mode === "live" && <p className={styles.note} role="status">{loading ? "Connecting to backend…" : error || (unit ? `Last update: ${new Date(unit.received_at).toLocaleString()}. Commands show requested output state, not mechanical confirmation.` : "No physical device telemetry yet. Check the Pi service and backend migration.")}</p>}
+      {mode === "live" && <p className={styles.note} role={loading || error ? "status" : undefined}>{loading ? "Connecting to backend…" : error || (unit ? `Sample #${unit.sequence ?? "unknown"} · Pi observed: ${unit.observed_at ? new Date(unit.observed_at).toLocaleTimeString() : "unknown"} · Backend received: ${new Date(unit.received_at).toLocaleTimeString()} · Browser refreshed: ${refreshedAt ? new Date(refreshedAt).toLocaleTimeString() : "unknown"}. Commands show requested output state, not mechanical confirmation.` : "No physical device telemetry yet. Check the Pi service and backend migration.")}</p>}
       {mode === "simulation" && <p className={styles.note}>Every value below is simulated in this browser. Nothing is sent to GPIO, UART, or production occupancy.</p>}
 
       <section className={styles.cards} aria-label="Connections and doors">

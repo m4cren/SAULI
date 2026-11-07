@@ -1,15 +1,15 @@
 """Hardware boundaries must stay deterministic without claiming real pins."""
 
 import asyncio
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-
-from sauli_pi.communication.protocol import FrameDecoder, FrameError, encode_frame
 from sauli_pi.communication.esp32_serial import EspLink
+from sauli_pi.communication.protocol import FrameDecoder, FrameError, encode_frame
 from sauli_pi.config import Config
 from sauli_pi.hardware.controller import DoorInput, GPIOController
 from sauli_pi.hardware_service import HardwareService, load_hardware
@@ -132,6 +132,8 @@ def test_simulation_starts_without_device_credential(tmp_path: Path):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+        assert service.ready is False
+        assert not any(service.gpio.outputs.values())
 
     asyncio.run(exercise())
 
@@ -182,3 +184,164 @@ def test_door_workflow_reports_open_and_close_timeouts():
     assert workflow.observe("open", now=21) == "workflow_door_opened"
     assert workflow.observe("open", now=26) == "workflow_close_timeout"
     assert workflow.snapshot()["fault"] == "door_close_timeout"
+
+
+def test_timing_config_rejects_invalid_values(tmp_path: Path):
+    file = tmp_path / "hardware.json"
+    file.write_text('{"mode":"simulation","telemetry_interval_seconds":0}', encoding="utf-8")
+    with pytest.raises(ValueError, match="telemetry_interval_seconds"):
+        load_hardware(file)
+    file.write_text('{"mode":"simulation","telemetry_interval_seconds":0.5,'
+                    '"telemetry_min_gap_seconds":0.75}', encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot exceed"):
+        load_hardware(file)
+    file.write_text('{"mode":"simulation"}', encoding="utf-8")
+    assert load_hardware(file)["telemetry_interval_seconds"] == 0.5
+
+
+def test_gpio_and_workflow_continue_during_blocked_heartbeat(monkeypatch, tmp_path: Path):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "simulation", "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "gpio_sample_seconds": 0.02, "telemetry_interval_seconds": 0.05,
+                "telemetry_min_gap_seconds": 0.02}
+    service = HardwareService(config, settings)
+    started = threading.Event()
+    release = threading.Event()
+    active = 0
+    maximum = 0
+    calls = []
+
+    def slow_request(_origin, path, payload, _credential):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        calls.append((path, payload))
+        started.set()
+        release.wait(timeout=2)
+        active -= 1
+        return {"commands": []}
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", slow_request)
+
+    async def exercise():
+        service.gpio.open()
+        level = [0]
+        service.gpio.sample_inputs = lambda: service.gpio.doors["pocket"].update(level[0])
+        service.gpio.doors["pocket"].update(0, now=time.monotonic() - 1)
+        service.gpio.sample_inputs()
+        service.record_door_changes()
+        service.door_workflow.start("test-command", "pocket", "closed")
+        service.door_workflow.pulse_finished()
+        sampler = asyncio.create_task(service._sample_loop())
+        publisher = asyncio.create_task(service._publish_loop())
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            level[0] = 1
+            deadline = time.monotonic() + 0.5
+            while service.door_workflow.snapshot()["phase"] != "awaiting_close" and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert service.door_workflow.snapshot()["phase"] == "awaiting_close"
+            assert any(event["kind"] == "pocket_door_open" for event in service.events)
+            # A blocked backend cannot cause a second in-flight request.
+            assert maximum == 1
+            service.door_workflow.deadline = time.monotonic() - 1
+            deadline = time.monotonic() + 0.2
+            while service.door_workflow.snapshot()["phase"] != "fault" and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert service.door_workflow.snapshot()["fault"] == "door_close_timeout"
+            release.set()
+            await asyncio.sleep(0.1)
+            assert any(event["kind"] == "workflow_door_opened" for event in service.events)
+            assert any(any(e["kind"] == "pocket_door_open" for e in call[1]["snapshot"]["events"])
+                       for call in calls if call[0] == "/api/hardware/heartbeat")
+        finally:
+            release.set()
+            sampler.cancel()
+            publisher.cancel()
+            await asyncio.gather(sampler, publisher, return_exceptions=True)
+            service.gpio.close()
+
+    asyncio.run(exercise())
+    assert maximum == 1
+
+
+def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path: Path):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "simulation", "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "telemetry_interval_seconds": 0.05, "telemetry_min_gap_seconds": 0.02}
+    service = HardwareService(config, settings)
+    commands = [{"id": str(uuid4())}, {"id": str(uuid4())}]
+    requests = []
+    executions = []
+
+    def fake_request(_origin, path, _payload, _credential):
+        requests.append(path)
+        if path == "/api/hardware/heartbeat":
+            return {"commands": commands if requests.count(path) == 1 else []}
+        if requests.count("/api/hardware/ack") == 1:
+            from sauli_pi.communication.backend_client import DeviceApiError
+            raise DeviceApiError("temporary failure")
+        return {"ok": True}
+
+    async def fake_command(row):
+        executions.append(row["id"])
+        return {"id": row["id"], "status": "acked", "code": "pulse_completed"}
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", fake_request)
+    service.handle_command = fake_command
+
+    async def exercise():
+        task = asyncio.create_task(service._publish_loop())
+        await asyncio.sleep(1.2)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert executions == [row["id"] for row in commands]
+    assert requests[:5] == ["/api/hardware/heartbeat", "/api/hardware/ack",
+                            "/api/hardware/ack", "/api/hardware/ack", "/api/hardware/heartbeat"]
+
+
+def test_silent_esp_read_does_not_block_gpio_sampling(tmp_path: Path):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "real", "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "gpio_sample_seconds": 0.02}
+    service = HardwareService(config, settings)
+    service.esp.serial = object()
+    reads = 0
+    samples = 0
+
+    async def silent_read():
+        nonlocal reads
+        reads += 1
+        await asyncio.sleep(0.25)
+        return []
+
+    async def silent_send(_message):
+        return None
+
+    def sample():
+        nonlocal samples
+        samples += 1
+
+    service.esp.read = silent_read
+    service.esp.send = silent_send
+    service.gpio.sample_inputs = sample
+
+    async def exercise():
+        sampler = asyncio.create_task(service._sample_loop())
+        serial = asyncio.create_task(service._esp_loop())
+        await asyncio.sleep(0.12)
+        sampler.cancel()
+        serial.cancel()
+        await asyncio.gather(sampler, serial, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert reads == 1
+    assert samples >= 4

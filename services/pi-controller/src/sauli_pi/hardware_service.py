@@ -6,13 +6,12 @@ import json
 import logging
 import time
 from collections import deque
-from uuid import UUID
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import FastAPI
-
 from sauli_pi.communication.backend_client import DeviceApiError, request_json
 from sauli_pi.communication.esp32_serial import EspLink
 from sauli_pi.config import Config, read_credential
@@ -28,6 +27,20 @@ def load_hardware(path: Path) -> dict:
         raise ValueError("Hardware mode must be explicitly real or simulation")
     if value.get("enable_actuators") and not value.get("output_polarity_verified"):
         raise ValueError("Verify output polarity before enabling actuators")
+    for key, default, minimum, maximum in (
+        ("gpio_sample_seconds", 0.05, 0.02, 0.2),
+        ("telemetry_interval_seconds", 0.5, 0.25, 30),
+        ("telemetry_min_gap_seconds", 0.15, 0.1, 5),
+    ):
+        try:
+            number = float(value.get(key, default))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid {key}") from exc
+        if not minimum <= number <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        value[key] = number
+    if value["telemetry_min_gap_seconds"] > value["telemetry_interval_seconds"]:
+        raise ValueError("telemetry_min_gap_seconds cannot exceed telemetry_interval_seconds")
     if value.get("mode") == "real":
         try:
             value["device_id"] = str(UUID(value["device_id"]))
@@ -57,6 +70,14 @@ class HardwareService:
         self.fault: str | None = None
         self._ping_seq = 0
         self._last_door_states: dict[str, str] = {}
+        self._last_raw_levels: dict[str, int | None] = {}
+        self._sequence = 0
+        self._observed_at: str | None = None
+        self._publish_signal = asyncio.Event()
+        self._pending_acks: deque[dict] = deque()
+        self._sample_seconds = float(settings.get("gpio_sample_seconds", 0.05))
+        self._telemetry_seconds = float(settings.get("telemetry_interval_seconds", 0.5))
+        self._min_gap_seconds = float(settings.get("telemetry_min_gap_seconds", 0.15))
         self.door_workflow = DoorWorkflow(
             open_timeout_seconds=float(settings.get("door_open_timeout_seconds", 5)),
             close_timeout_seconds=float(settings.get("door_close_timeout_seconds", 30)))
@@ -66,22 +87,33 @@ class HardwareService:
         entry = {"at": datetime.now(UTC).isoformat(), "kind": kind}
         if command_id:
             entry["command_id"] = command_id
-        self.events = ([entry] + self.events)[:20]
+        self.events = ([entry] + self.events)[:64]
+        self._changed()
+
+    def _changed(self) -> None:
+        self._sequence += 1
+        self._observed_at = datetime.now(UTC).isoformat()
+        self._publish_signal.set()
 
     def snapshot(self) -> dict:
-        self.gpio.sample_inputs()
         return {"schema_version": 1, "unit_code": self.config.unit_code,
                 "device_code": self.config.device_code,
                 "recorded_at": datetime.now(UTC).isoformat(),
+                "observed_at": self._observed_at, "sequence": self._sequence,
                 "backend": self.backend, "pi": self.gpio.snapshot(),
                 "esp": self.esp.snapshot() if self.settings["mode"] == "real" else
                 {"connection": "simulated", "telemetry": None},
-                "events": self.events[:10],
+                "events": self.events[:64],
                 "door_workflow": self.door_workflow.snapshot()}
 
     def record_door_changes(self) -> None:
         for name, door in self.gpio.doors.items():
-            state = door.snapshot()["door"]
+            sample = door.snapshot()
+            state = sample["door"]
+            raw = sample["raw_level"]
+            if name in self._last_raw_levels and raw != self._last_raw_levels[name]:
+                self._changed()
+            self._last_raw_levels[name] = raw
             previous = self._last_door_states.get(name)
             if previous is not None and state != previous and state in {"open", "closed"}:
                 self.event(f"{name}_door_{state}")
@@ -114,7 +146,6 @@ class HardwareService:
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
-            self.gpio.sample_inputs()
             self.door_workflow.start(
                 command_id, door, self.gpio.doors[door].snapshot()["door"])
             self.event("command_accepted", command_id)
@@ -140,6 +171,116 @@ class HardwareService:
             self.event("command_failed", command_id)
             return {"id": command_id, "status": "failed", "code": "hardware_failure"}
 
+    async def _sample_loop(self) -> None:
+        while True:
+            self.gpio.sample_inputs()
+            self.record_door_changes()
+            await asyncio.sleep(self._sample_seconds)
+
+    async def _esp_loop(self) -> None:
+        next_connect = 0.0
+        next_ping = 0.0
+        while True:
+            if self.esp.serial is None:
+                if time.monotonic() >= next_connect:
+                    next_connect = time.monotonic() + 5
+                    try:
+                        await asyncio.to_thread(self.esp.connect)
+                        self._changed()
+                    except (OSError, ImportError):
+                        if self.esp.error != "serial_unavailable":
+                            self.esp.error = "serial_unavailable"
+                            self._changed()
+                await asyncio.sleep(0.25)
+                continue
+            messages = await self.esp.read()
+            if self.esp.serial is None:
+                self.event("esp_disconnected")
+                continue
+            for message in messages:
+                if message["type"] == "hello":
+                    self.event("esp_hello")
+                else:
+                    self._changed()
+                if message["type"] == "ping":
+                    try:
+                        await self.esp.send({"v": 1, "type": "pong", "seq": message.get("seq", 0),
+                                             "uptime_ms": int(time.monotonic() * 1000)})
+                    except ConnectionError:
+                        self.event("esp_disconnected")
+            if self.esp.serial is not None and time.monotonic() >= next_ping:
+                next_ping = time.monotonic() + 3
+                self._ping_seq += 1
+                try:
+                    await self.esp.send({"v": 1, "type": "ping", "seq": self._ping_seq,
+                                         "uptime_ms": int(time.monotonic() * 1000)})
+                except ConnectionError:
+                    self.event("esp_disconnected")
+            if (self.esp.last_seen and time.monotonic() - self.esp.last_seen > 10
+                    and self.esp.error != "telemetry_stale"):
+                self.esp.error = "telemetry_stale"
+                self._changed()
+            if not messages:
+                await asyncio.sleep(0.05)
+
+    async def _publish_loop(self) -> None:
+        last_attempt = 0.0
+        last_success = 0.0
+        published_sequence = -1
+        retry_at = 0.0
+        backoff = 1.0
+        while True:
+            now = time.monotonic()
+            dirty = self._sequence != published_sequence
+            next_due = min(last_success + self._telemetry_seconds,
+                           last_attempt + self._min_gap_seconds if dirty else float("inf"))
+            next_due = max(next_due, retry_at)
+            if now < next_due:
+                try:
+                    await asyncio.wait_for(self._publish_signal.wait(), timeout=next_due - now)
+                except TimeoutError:
+                    pass
+                self._publish_signal.clear()
+                continue
+            last_attempt = now
+            try:
+                # A claimed command's acknowledgement is retried before claiming more work.
+                while self._pending_acks:
+                    await asyncio.to_thread(request_json, self.config.backend_url,
+                                            "/api/hardware/ack", self._pending_acks[0], self.credential)
+                    self._pending_acks.popleft()
+                sent_sequence = self._sequence
+                result = await asyncio.to_thread(
+                    request_json, self.config.backend_url, "/api/hardware/heartbeat",
+                    {"snapshot": self.snapshot()}, self.credential)
+                if self.backend != "online":
+                    self.backend = "online"
+                    self._changed()
+                published_sequence = sent_sequence
+                last_success = time.monotonic()
+                backoff = 1.0
+                retry_at = 0.0
+                for row in result.get("commands", []):
+                    ack = await self.handle_command(row)
+                    self._pending_acks.append(ack)
+                while self._pending_acks:
+                    await asyncio.to_thread(request_json, self.config.backend_url,
+                                            "/api/hardware/ack", self._pending_acks[0], self.credential)
+                    self._pending_acks.popleft()
+            except DeviceApiError:
+                if self.backend != "offline":
+                    self.backend = "offline"
+                    self.event("backend_unavailable")
+                retry_at = time.monotonic() + backoff
+                backoff = min(backoff * 2, 30)
+            except Exception:
+                if self.backend != "offline":
+                    self.backend = "offline"
+                    self.event("backend_unavailable")
+                LOG.exception("Hardware publication failed")
+                retry_at = time.monotonic() + backoff
+                backoff = min(backoff * 2, 30)
+
     async def run(self) -> None:
         if self.settings["mode"] == "real":
             try:
@@ -150,6 +291,7 @@ class HardwareService:
                 return
         try:
             self.gpio.open()
+            self.gpio.sample_inputs()
             self.record_door_changes()
             self.ready = True
         except Exception:
@@ -157,64 +299,16 @@ class HardwareService:
             LOG.exception("Hardware GPIO startup failed")
             return
         try:
-            if self.settings["mode"] == "real":
-                try:
-                    self.esp.connect()
-                except Exception:
-                    self.esp.error = "serial_unavailable"
-            next_report = 0.0
-            next_connect = 0.0
-            next_ping = 0.0
-            while True:
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(self._sample_loop())
                 if self.settings["mode"] == "real":
-                    if self.esp.serial is None and time.monotonic() >= next_connect:
-                        next_connect = time.monotonic() + 5
-                        try:
-                            self.esp.connect()
-                        except Exception:
-                            self.esp.error = "serial_unavailable"
-                    if self.esp.serial is not None:
-                        for message in await self.esp.read():
-                            if message["type"] == "hello":
-                                self.event("esp_hello")
-                            elif message["type"] == "ping":
-                                try:
-                                    await self.esp.send({"v": 1, "type": "pong", "seq": message.get("seq", 0), "uptime_ms": int(time.monotonic() * 1000)})
-                                except ConnectionError:
-                                    self.event("esp_disconnected")
-                        if self.esp.serial is not None and time.monotonic() >= next_ping:
-                            next_ping = time.monotonic() + 3
-                            self._ping_seq += 1
-                            try:
-                                await self.esp.send({"v": 1, "type": "ping", "seq": self._ping_seq, "uptime_ms": int(time.monotonic() * 1000)})
-                            except ConnectionError:
-                                self.event("esp_disconnected")
-                        if self.esp.last_seen and time.monotonic() - self.esp.last_seen > 10:
-                            self.esp.error = "telemetry_stale"
-                self.gpio.sample_inputs()
-                self.record_door_changes()
-                if self.settings["mode"] == "real" and time.monotonic() >= next_report:
-                    next_report = time.monotonic() + 2
-                    try:
-                        result = await asyncio.to_thread(
-                            request_json, self.config.backend_url,
-                            "/api/hardware/heartbeat",
-                            {"snapshot": self.snapshot()}, self.credential)
-                        self.backend = "online"
-                        for row in result.get("commands", []):
-                            ack = await self.handle_command(row)
-                            await asyncio.to_thread(
-                                request_json, self.config.backend_url,
-                                "/api/hardware/ack", ack, self.credential)
-                    except DeviceApiError:
-                        self.backend = "offline"
-                        self.event("backend_unavailable")
-                    except Exception:
-                        self.backend = "offline"
-                        LOG.exception("Hardware heartbeat failed")
-                        self.event("backend_unavailable")
-                await asyncio.sleep(0.1)
+                    tasks.create_task(self._esp_loop())
+                    tasks.create_task(self._publish_loop())
+        except Exception:
+            self.fault = "hardware_loop_failed"
+            LOG.exception("Hardware monitoring stopped")
         finally:
+            self.ready = False
             self.esp.close()
             self.gpio.close()
 

@@ -8,6 +8,9 @@
     "pocket_light_gate": true, "medium_light_gate": true
   },
   "solenoid_pulse_seconds": 0.35,
+  "gpio_sample_seconds": 0.05,
+  "telemetry_interval_seconds": 0.5,
+  "telemetry_min_gap_seconds": 0.15,
   "door_open_timeout_seconds": 5,
   "door_close_timeout_seconds": 30,
   "enable_actuators": false,

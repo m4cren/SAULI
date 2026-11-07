@@ -53,6 +53,8 @@ select code,size_class,is_active,status,current_found_item_id from public.storag
 
 The Pi/ESP hardware pin map and an input-only first test are documented in the root [instruction.md](../instruction.md). The ESP HX711 DOUT assignment covers 8 pocket and 4 medium positions, with a shared clock. The 74HC595 Q-bit-to-compartment mapping is still unverified and no light output is driven. Apply `supabase/migrations/202611070001_sauli_hardware_diagnostics.sql` before enabling the Pi hardware service. `HARDWARE_TEST_ENABLED=false` keeps admin test commands off. The public `/hardware-debug` page shows only sanitized backend telemetry; its simulation is browser-local.
 
+Hardware latency defaults: the Pi samples GPIO every 50 ms on its own task, coalesces changed telemetry with a 150 ms minimum upload gap, and sends a 500 ms liveness heartbeat. ESP serial waiting and backend requests run independently of GPIO sampling. The public debug page polls while visible every 250 ms, never overlaps requests, and backs off when unavailable. `gpio_sample_seconds`, `telemetry_interval_seconds`, and `telemetry_min_gap_seconds` are optional validated keys in `/etc/sauli/hardware.json`; existing files retain the defaults. The heartbeat stores a bounded recent event history and a sequence/observation timestamp. The public API exposes these markers and backend receipt time, without credentials or item data. See [instruction.md](../instruction.md) for the exact Pi update and measurement steps. Restart the central FastAPI process after deploying this code, and deploy the frontend on Vercel; no new SQL migration is required.
+
 Start FastAPI from `services/api`:
 
 ```powershell

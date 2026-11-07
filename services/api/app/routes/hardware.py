@@ -1,10 +1,10 @@
 """Device-scoped hardware telemetry and a public, sanitized read-only view."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.dependencies import get_admin_user
@@ -85,9 +85,12 @@ class DoorWorkflowState(BaseModel):
 
 class HardwareSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    sequence: int | None = Field(default=None, ge=0)
+    observed_at: datetime | None = None
+    recorded_at: datetime | None = None
     pi: PiState
     esp: EspState
-    events: list[HardwareEvent] = Field(default_factory=list, max_length=20)
+    events: list[HardwareEvent] = Field(default_factory=list, max_length=64)
     door_workflow: DoorWorkflowState = Field(default_factory=DoorWorkflowState)
 
 
@@ -124,7 +127,8 @@ async def acknowledge(request: Request, payload: Ack, device: Device):
 
 
 @router.get("/public")
-async def public_status(request: Request):
+async def public_status(request: Request, response: Response):
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     return await request.app.state.kiosks.public_hardware_status()
 
 

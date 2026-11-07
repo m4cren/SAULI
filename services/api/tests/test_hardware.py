@@ -2,11 +2,10 @@
 
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
-
 from app.auth.kiosk import get_device
 from app.config import Settings
 from app.main import create_app
+from fastapi.testclient import TestClient
 
 
 def snapshot():
@@ -40,6 +39,8 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
         async def hardware_heartbeat(self, incoming, data):
             assert incoming == device
             assert "secret" not in data
+            assert data["sequence"] == 42
+            assert data["observed_at"] == "2026-11-07T12:00:00Z"
             assert data["pi"]["lock_feedback"] == "unavailable"
             assert data["events"][0]["kind"] == "command_completed"
             assert "private_note" not in data["events"][0]
@@ -51,6 +52,8 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
     app.state.kiosks = Kiosks()
     data = snapshot()
     data["secret"] = "must-be-dropped"
+    data["sequence"] = 42
+    data["observed_at"] = "2026-11-07T12:00:00Z"
     data["events"] = [{"at": "2026-11-07T12:00:00Z", "kind": "command_completed",
                        "command_id": str(uuid4()), "private_note": "must-be-dropped"}]
     with TestClient(app) as client:
@@ -66,6 +69,8 @@ def test_public_status_is_read_only_and_admin_control_disabled_by_default():
             return {"units": []}
     app.state.kiosks = Kiosks()
     with TestClient(app) as client:
-        assert client.get("/api/hardware/public").json() == {"units": []}
+        response = client.get("/api/hardware/public")
+        assert response.json() == {"units": []}
+        assert response.headers["cache-control"] == "no-store, max-age=0"
         assert client.post("/api/hardware/admin/test-command", json={
             "device_id": str(uuid4()), "action": "pulse_pocket"}).status_code in (401, 403)

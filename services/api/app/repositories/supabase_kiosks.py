@@ -1,5 +1,6 @@
 """Service-role access to registered units and short-lived kiosk identities."""
 
+import asyncio
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -216,12 +217,12 @@ class SupabaseKioskRepository:
         return rows[0]
 
     async def public_hardware_status(self) -> dict:
-        rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_snapshots")
-            .select("device_id,unit_id,snapshot,received_at").order("received_at", desc=True)
-            .limit(50).execute().data or [])
-        units = await self.locations()
+        rows, units, devices = await asyncio.gather(
+            run_in_threadpool(lambda: self.client().table("sauli_hardware_snapshots")
+                .select("device_id,unit_id,snapshot,received_at").order("received_at", desc=True)
+                .limit(50).execute().data or []),
+            self.locations(), self.devices())
         labels = {unit["id"]: unit["display_name"] for unit in units}
-        devices = await self.devices()
         active_devices = {device["id"] for device in devices
                           if device["status"] == "active" and not device["revoked_at"]}
         now = datetime.now(UTC)
@@ -238,6 +239,8 @@ class SupabaseKioskRepository:
             result.append({
                 "unit_name": labels[row["unit_id"]],
                 "received_at": row["received_at"],
+                "sequence": snapshot.get("sequence"),
+                "observed_at": snapshot.get("observed_at"),
                 "connection": "online" if age <= 10 else "stale" if age <= 30 else "offline",
                 "doors": pi.get("doors", {}), "outputs": pi.get("outputs", {}),
                 "lock_feedback": "unavailable",

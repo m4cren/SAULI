@@ -10,6 +10,6 @@ export async function GET() {
     if (!response.ok) throw new Error("backend_unavailable");
     return Response.json(await response.json(), { headers: { "Cache-Control": "no-store" } });
   } catch {
-    return Response.json({ error: "Hardware status is unavailable." }, { status: 503 });
+    return Response.json({ error: "Hardware status is unavailable." }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
