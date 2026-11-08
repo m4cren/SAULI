@@ -13,6 +13,15 @@ with unit_layout as (
 select
   (select environment from public.sauli_deployment_guard where id = 1) as deployment_guard,
   (select count(*) from public.sauli_units) as units,
+  (select count(*) from public.kiosk_devices) as registered_kiosks,
+  (select count(*) from public.kiosk_devices where status = 'active') as active_kiosks,
+  (select count(*) from public.kiosk_device_credentials) as kiosk_credentials,
+  (select count(*) from public.kiosk_device_credentials c
+    join public.kiosk_devices d on d.id = c.device_id
+    where d.status = 'active' and c.revoked_at is null
+      and (c.expires_at is null or c.expires_at > now()))
+    as valid_kiosk_credentials,
+  (select count(*) from public.kiosk_browser_sessions) as kiosk_browser_sessions,
   (select count(*) from public.found_items) as found_items,
   (select count(*) from public.missing_reports) as missing_reports,
   (select count(*) from public.storage_slots
@@ -38,4 +47,10 @@ select
   (select coalesce(jsonb_agg(jsonb_build_object(
       'unit',unit_code, 'active_slots',active_slots,
       'pocket_slots',pocket_slots, 'medium_slots',medium_slots)
-      order by unit_code), '[]'::jsonb) from unit_layout) as active_slot_layout;
+      order by unit_code), '[]'::jsonb) from unit_layout) as active_slot_layout,
+  (select coalesce(jsonb_agg(jsonb_build_object(
+      'unit',u.unit_code, 'device_id',d.id, 'device_code',d.device_code,
+      'status',d.status, 'primary',d.is_primary)
+      order by u.unit_code,d.device_code), '[]'::jsonb)
+    from public.kiosk_devices d join public.sauli_units u on u.id = d.unit_id)
+    as registered_kiosk_details;

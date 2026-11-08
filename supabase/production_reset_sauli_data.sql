@@ -23,6 +23,19 @@ lock table public.sauli_deployment_guard, public.sauli_units,
   public.missing_reports, public.search_requests,
   public.sauli_email_dispatch_clock in access exclusive mode;
 
+-- Prevent registration changes while preserving kiosk identities and sessions.
+lock table public.kiosk_devices, public.kiosk_device_credentials,
+  public.kiosk_browser_sessions in share mode;
+create temporary table sauli_reset_devices on commit drop as
+select id, unit_id, device_code, status, is_primary, revoked_at
+from public.kiosk_devices;
+create temporary table sauli_reset_credentials on commit drop as
+select id, device_id, secret_hash, expires_at, revoked_at
+from public.kiosk_device_credentials;
+create temporary table sauli_reset_browser_sessions on commit drop as
+select id, device_id, token_hash, expires_at, revoked_at
+from public.kiosk_browser_sessions;
+
 do $$
 declare
   v_confirmation text := 'REPLACE_WITH_CONFIRMATION';
@@ -102,6 +115,23 @@ do $$ begin
       or status in ('reserved','occupied') or reserved_at is not null
       or occupied_at is not null) then
     raise exception 'SAULI_PRODUCTION_RESET_VERIFICATION_FAILED';
+  end if;
+  if exists (select * from sauli_reset_devices except
+      select id, unit_id, device_code, status, is_primary, revoked_at
+      from public.kiosk_devices)
+    or exists (select id, unit_id, device_code, status, is_primary, revoked_at
+      from public.kiosk_devices except select * from sauli_reset_devices)
+    or exists (select * from sauli_reset_credentials except
+      select id, device_id, secret_hash, expires_at, revoked_at
+      from public.kiosk_device_credentials)
+    or exists (select id, device_id, secret_hash, expires_at, revoked_at
+      from public.kiosk_device_credentials except select * from sauli_reset_credentials)
+    or exists (select * from sauli_reset_browser_sessions except
+      select id, device_id, token_hash, expires_at, revoked_at
+      from public.kiosk_browser_sessions)
+    or exists (select id, device_id, token_hash, expires_at, revoked_at
+      from public.kiosk_browser_sessions except select * from sauli_reset_browser_sessions) then
+    raise exception 'SAULI_PRODUCTION_RESET_KIOSK_REGISTRATION_CHANGED';
   end if;
   if exists (select 1 from public.sauli_units u where
       (select count(*) from public.storage_slots s where s.unit_id = u.id and s.is_active) <> 12

@@ -7,7 +7,7 @@
 -- The default database guard is production and rejects this script.
 -- This preserves Auth users, units, all slot rows, device registrations,
 -- credentials, browser sessions, pairing audit, and Storage bucket/files.
--- Kiosk enrollment rate counters are cleared only for an ALL-unit reset.
+-- Kiosk enrollment rate counters are also preserved.
 -- Remove Storage files separately through the Storage API or dashboard.
 
 begin;
@@ -33,9 +33,21 @@ lock table public.found_items, public.storage_slots, public.storage_slot_events,
   public.sauli_hardware_snapshots, public.sauli_hardware_commands,
   public.match_candidates, public.retrieval_sessions, public.retrieval_events,
   public.retrieval_logs, public.matching_jobs, public.email_notifications,
-  public.missing_reports, public.search_requests, public.sauli_email_dispatch_clock,
-  public.kiosk_rate_limits
+  public.missing_reports, public.search_requests, public.sauli_email_dispatch_clock
   in access exclusive mode;
+
+-- Keep kiosk identity and active login material stable throughout the reset.
+lock table public.kiosk_devices, public.kiosk_device_credentials,
+  public.kiosk_browser_sessions in share mode;
+create temporary table sauli_reset_devices on commit drop as
+select id, unit_id, device_code, status, is_primary, revoked_at
+from public.kiosk_devices;
+create temporary table sauli_reset_credentials on commit drop as
+select id, device_id, secret_hash, expires_at, revoked_at
+from public.kiosk_device_credentials;
+create temporary table sauli_reset_browser_sessions on commit drop as
+select id, device_id, token_hash, expires_at, revoked_at
+from public.kiosk_browser_sessions;
 
 create temporary table sauli_reset_items on commit drop as
 select fi.id from public.found_items fi
@@ -108,12 +120,28 @@ do $$ begin
     delete from public.missing_reports;
     delete from public.search_requests;
     delete from public.sauli_email_dispatch_clock;
-    delete from public.kiosk_rate_limits;
     insert into public.sauli_email_dispatch_clock(id,next_allowed_at) values(1,now());
   end if;
   if exists (select 1 from sauli_reset_items i
     join public.found_items fi on fi.id = i.id) then
     raise exception 'SAULI_RESET_VERIFICATION_FAILED';
+  end if;
+  if exists (select * from sauli_reset_devices except
+      select id, unit_id, device_code, status, is_primary, revoked_at
+      from public.kiosk_devices)
+    or exists (select id, unit_id, device_code, status, is_primary, revoked_at
+      from public.kiosk_devices except select * from sauli_reset_devices)
+    or exists (select * from sauli_reset_credentials except
+      select id, device_id, secret_hash, expires_at, revoked_at
+      from public.kiosk_device_credentials)
+    or exists (select id, device_id, secret_hash, expires_at, revoked_at
+      from public.kiosk_device_credentials except select * from sauli_reset_credentials)
+    or exists (select * from sauli_reset_browser_sessions except
+      select id, device_id, token_hash, expires_at, revoked_at
+      from public.kiosk_browser_sessions)
+    or exists (select id, device_id, token_hash, expires_at, revoked_at
+      from public.kiosk_browser_sessions except select * from sauli_reset_browser_sessions) then
+    raise exception 'SAULI_RESET_KIOSK_REGISTRATION_CHANGED';
   end if;
   if exists (select 1 from public.sauli_units u where
     (select count(*) from public.storage_slots s where s.unit_id = u.id and s.is_active) <> 12
