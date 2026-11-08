@@ -56,7 +56,9 @@ def test_production_reset_runs_without_placeholders_and_preserves_identity():
     assert "sauli_production_reset_wrong_environment" in sql
     assert "sauli_production_reset_kiosk_registration_changed" in sql
     assert "sauli_production_reset_verification_failed" in sql
-    assert "begin;" in sql and "commit;" in sql
+    assert "do $sauli_reset$" in sql and "end\n$sauli_reset$;" in sql
+    assert "create temporary table" not in sql
+    assert "v_devices_before is distinct from v_devices_after" in sql
     for table in ("sauli_units", "kiosk_devices", "kiosk_device_credentials",
                   "kiosk_browser_sessions", "sauli_deployment_guard"):
         assert f"delete from public.{table}" not in sql
