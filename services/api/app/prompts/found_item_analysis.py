@@ -100,6 +100,10 @@ metal" or "lid: plastic". If material cannot be confirmed visually, describe it
 as likely or leave the array empty rather than claiming certainty.
 
 6. STORAGE SIZE
+
+Use the reference black box on the scanning surface in the middle, If the item fits on
+that small box, it will be considered as "pocket size", if it is exceeded, it will be medium size
+
 Choose exactly one storage_size for the whole item, including handles, straps,
 or other attached parts. Use "pocket" for small personal objects such as a
 wristwatch, keys, jewelry, a wallet, or a phone. Use "medium" for bulkier
@@ -162,4 +166,3 @@ reported.
 Return only one valid JSON object. Do not return Markdown, commentary, or the
 internal inspection process.
 """.strip()
-

@@ -2,13 +2,18 @@
 
 import asyncio
 import hashlib
+import logging
 import secrets
+import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import httpx
 from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ServiceError
+
+log = logging.getLogger("sauli.kiosks")
 
 
 def digest(value: str) -> str:
@@ -30,6 +35,21 @@ class SupabaseKioskRepository:
 
     def client(self):
         return self.items.require()
+
+    async def _read_identity(self, fetch):
+        def retry():
+            # Identity queries are reads; retry a dropped connection before
+            # reporting that Supabase is temporarily unavailable.
+            for attempt in range(3):
+                try:
+                    return fetch()
+                except httpx.TransportError as exc:
+                    if attempt == 2:
+                        log.warning("Kiosk identity lookup failed", exc_info=True)
+                        raise ServiceError("SUPABASE_UNAVAILABLE",
+                                           "Kiosk service is temporarily unavailable. Please try again.", 503) from exc
+                    time.sleep(0.2 * (attempt + 1))
+        return await run_in_threadpool(retry)
 
     async def rpc(self, name: str, params: dict):
         return await run_in_threadpool(
@@ -118,7 +138,7 @@ class SupabaseKioskRepository:
             if expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) <= datetime.now(UTC):
                 return None
             return self._active_device(rows[0]["device_id"])
-        return await run_in_threadpool(fetch)
+        return await self._read_identity(fetch)
 
     def _active_device(self, device_id: str) -> dict | None:
         rows = (self.client().table("kiosk_devices").select("id,unit_id,device_code,status,revoked_at")
@@ -162,7 +182,7 @@ class SupabaseKioskRepository:
             if not rows or datetime.fromisoformat(rows[0]["expires_at"].replace("Z", "+00:00")) <= datetime.now(UTC):
                 return None
             return self._active_device(rows[0]["device_id"])
-        return await run_in_threadpool(fetch)
+        return await self._read_identity(fetch)
 
     async def rotate(self, device: dict, credential: str) -> dict:
         replacement = secret()
