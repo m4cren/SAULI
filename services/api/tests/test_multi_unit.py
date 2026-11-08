@@ -47,14 +47,15 @@ def test_reset_is_guarded_and_preserves_registration():
     assert "delete from storage.objects" not in sql
 
 
-def test_production_reset_requires_preflight_and_preserves_identity():
+def test_production_reset_runs_without_placeholders_and_preserves_identity():
     preflight = PRODUCTION_PREFLIGHT.read_text(encoding="utf-8").lower()
     sql = PRODUCTION_RESET.read_text(encoding="utf-8").lower()
     assert "delete from" not in preflight and "update public." not in preflight
-    assert "v_confirmation text := 'replace_with_confirmation'" in sql
-    assert "reset all sauli production data" in sql
-    assert "sauli_production_reset_counts_changed" in sql
-    assert "v_expected_nonempty_slots" in sql
+    assert "replace_with_confirmation" not in sql
+    assert "v_expected_" not in sql
+    assert "sauli_production_reset_wrong_environment" in sql
+    assert "sauli_production_reset_kiosk_registration_changed" in sql
+    assert "sauli_production_reset_verification_failed" in sql
     assert "begin;" in sql and "commit;" in sql
     for table in ("sauli_units", "kiosk_devices", "kiosk_device_credentials",
                   "kiosk_browser_sessions", "sauli_deployment_guard"):

@@ -1,17 +1,15 @@
 -- MANUAL, DESTRUCTIVE, ALL-UNIT PRODUCTION OPERATIONAL RESET.
--- Run only after reviewing production_reset_preflight.sql, taking a database
--- backup, physically emptying every cabinet, and stopping kiosk writes and
--- matching/email workers. This script is deliberately NOT a migration.
+-- Run only after taking a database backup, physically emptying every cabinet,
+-- and stopping kiosk writes and matching/email workers. This script is
+-- deliberately NOT a migration.
 -- Do not run if any item is still inside a cabinet: this marks slots available.
 -- Preserve this script with the development reset whenever application tables
 -- change. Auth users, units, devices, credentials, browser sessions, device
 -- audit events, slot rows and Storage files are preserved. Remove test images
 -- separately through the Storage API or dashboard, never storage.objects SQL.
 --
--- Before running, replace the five values in the first DO block below with:
---   confirmation: RESET ALL SAULI PRODUCTION DATA
---   units, found_items, missing_reports, nonempty_slots: exact preflight counts
--- The default placeholders make accidental execution fail before any deletion.
+-- Run the entire file as one query. No confirmation values or counts are needed.
+-- The production-environment guard and kiosk-registration checks remain active.
 
 begin;
 set local lock_timeout = '10s';
@@ -36,30 +34,10 @@ create temporary table sauli_reset_browser_sessions on commit drop as
 select id, device_id, token_hash, expires_at, revoked_at
 from public.kiosk_browser_sessions;
 
-do $$
-declare
-  v_confirmation text := 'REPLACE_WITH_CONFIRMATION';
-  v_expected_units bigint := -1;
-  v_expected_found_items bigint := -1;
-  v_expected_missing_reports bigint := -1;
-  v_expected_nonempty_slots bigint := -1;
-begin
+do $$ begin
   if (select environment from public.sauli_deployment_guard where id = 1)
       is distinct from 'production' then
     raise exception 'SAULI_PRODUCTION_RESET_WRONG_ENVIRONMENT';
-  end if;
-  if v_confirmation <> 'RESET ALL SAULI PRODUCTION DATA'
-      or v_expected_units < 1 or v_expected_found_items < 0
-      or v_expected_missing_reports < 0 or v_expected_nonempty_slots < 0 then
-    raise exception 'SAULI_PRODUCTION_RESET_NOT_CONFIRMED';
-  end if;
-  if v_expected_units <> (select count(*) from public.sauli_units)
-      or v_expected_found_items <> (select count(*) from public.found_items)
-      or v_expected_missing_reports <> (select count(*) from public.missing_reports)
-      or v_expected_nonempty_slots <> (select count(*) from public.storage_slots
-        where current_found_item_id is not null or status in ('reserved','occupied')
-          or reserved_at is not null or occupied_at is not null) then
-    raise exception 'SAULI_PRODUCTION_RESET_COUNTS_CHANGED: rerun preflight';
   end if;
   if exists (select 1 from public.sauli_units u where
       (select count(*) from public.storage_slots s where s.unit_id = u.id and s.is_active) <> 12

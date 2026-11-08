@@ -1,6 +1,5 @@
--- READ ONLY. Run this single query in the production SQL Editor and keep its
--- result. The four counts used by the reset are units, found_items,
--- missing_reports, and nonempty_slots. The other counts show the full impact.
+-- READ ONLY. Optional production snapshot before or after the reset.
+-- These counts show its impact; the reset script needs no values copied from here.
 with unit_layout as (
   select u.unit_code,
     count(s.id) filter (where s.is_active) as active_slots,
