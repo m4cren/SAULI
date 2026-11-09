@@ -1,10 +1,13 @@
 """Hardware telemetry is device scoped; public diagnostics are read only."""
 
+import asyncio
+from types import SimpleNamespace
 from uuid import uuid4
 
 from app.auth.kiosk import get_device, get_kiosk_session
 from app.config import Settings
 from app.main import create_app
+from app.repositories.supabase_kiosks import SupabaseKioskRepository
 from fastapi.testclient import TestClient
 
 
@@ -44,6 +47,9 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
             assert data["pi"]["lock_feedback"] == "unavailable"
             assert data["events"][0]["kind"] == "command_completed"
             assert "private_note" not in data["events"][0]
+            assert data["esp"]["boot_id"] == "boot_123"
+            assert data["esp"]["telemetry_at"] == "2026-11-07T12:00:00Z"
+            assert data["pending_presence_count"] == 2
 
         async def claim_hardware_commands(self, incoming):
             assert incoming == device
@@ -58,6 +64,9 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
     data["secret"] = "must-be-dropped"
     data["sequence"] = 42
     data["observed_at"] = "2026-11-07T12:00:00Z"
+    data["esp"]["boot_id"] = "boot_123"
+    data["esp"]["telemetry_at"] = "2026-11-07T12:00:00Z"
+    data["pending_presence_count"] = 2
     data["events"] = [{"at": "2026-11-07T12:00:00Z", "kind": "command_completed",
                        "command_id": str(uuid4()), "private_note": "must-be-dropped"}]
     with TestClient(app) as client:
@@ -123,3 +132,52 @@ def test_workflow_and_capture_light_require_kiosk_session():
         assert client.get("/api/hardware/workflow", params={"item_id": item_id}).json() == {"status": "waiting"}
         assert client.get("/api/hardware/workflow").status_code == 422
         assert client.post("/api/hardware/capture-light", json={"enabled": True}).status_code == 202
+
+
+def test_hardware_workflow_surfaces_other_active_incidents_in_same_unit():
+    unit_id, item_id, other_item_id, wrong_slot_id = (str(uuid4()) for _ in range(4))
+    queries = []
+
+    class Query:
+        def __init__(self, table):
+            self.table = table
+            self.filters = {}
+
+        def select(self, _columns):
+            return self
+
+        def eq(self, column, value):
+            self.filters[column] = value
+            return self
+
+        def limit(self, _count):
+            return self
+
+        def order(self, _column, desc=False):
+            return self
+
+        def execute(self):
+            queries.append((self.table, self.filters.copy()))
+            rows = {
+                "found_items": [{"id": item_id, "unit_id": unit_id,
+                                 "placement_status": "reserved"}],
+                "sauli_hardware_incidents": [{"slot_id": wrong_slot_id,
+                                              "kind": "wrong_removal",
+                                              "found_item_id": other_item_id}],
+                "storage_slots": [{"id": wrong_slot_id, "code": "P-06"}],
+                "sauli_hardware_snapshots": [],
+                "sauli_hardware_transactions": [],
+            }
+            return SimpleNamespace(data=rows[self.table])
+
+    class Client:
+        def table(self, name):
+            return Query(name)
+
+    repository = SupabaseKioskRepository(None)
+    repository.client = lambda: Client()
+    workflow = asyncio.run(repository.hardware_workflow(
+        {"unit_id": unit_id}, item_id=item_id, session_id=None))
+
+    assert workflow["wrong_slots"] == ["P-06"]
+    assert ("sauli_hardware_incidents", {"unit_id": unit_id, "active": True}) in queries

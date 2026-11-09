@@ -4,7 +4,7 @@ This guide uses the existing Raspberry Pi 4 checkout at `/home/sauli/sauli`, one
 
 ## 1. Deploy the compatible application and schema
 
-Commit and push the tested revision on the development PC. Apply pending migrations in order to the intended Supabase project, including `supabase/migrations/202611070001_sauli_hardware_diagnostics.sql`, then `supabase/migrations/202611090001_sauli_hardware_presence.sql`. The latter adds presence, event, incident, and lighting guidance records; it does not clear item records or registered kiosks. Restart FastAPI and deploy the corresponding frontend revision to Vercel. Keep `HARDWARE_TEST_ENABLED=false` for normal operation; it gates separate admin test pulses. The backend needs its existing Supabase service role configuration and kiosk/device authentication.
+Commit and push the tested revision on the development PC. Apply pending migrations in order to the intended Supabase project, including `supabase/migrations/202611070001_sauli_hardware_diagnostics.sql`, `supabase/migrations/202611090001_sauli_hardware_presence.sql`, and `supabase/migrations/202611090002_sauli_door_gated_hardware_transactions.sql`. The last migration adds door-gated transaction state and changes placement/retrieval finalization; it does not clear item records or registered kiosks. Apply it before deploying the matching FastAPI, Pi controller, and Vercel frontend revisions. Do not run either reset script as part of this upgrade. Keep `HARDWARE_TEST_ENABLED=false` for normal operation; it gates separate admin test pulses. The backend needs its existing Supabase service role configuration and kiosk/device authentication.
 
 On the Pi, preserve any local edits shown by `git status` before pulling. Do not clone over the existing checkout.
 
@@ -33,7 +33,7 @@ These are **Pi BCM** assignments in the current controller. BCM24 main light and
 | UART TX / RX | 14 / 15 | 8 / 10 |
 | OS power button | 3 | 5 |
 
-Check BCM8/7 against SPI0 CE0/CE1 ownership. Reeds connect only to Pi GND and their respective inputs, never 5 V or 12 V. The power button connects BCM3 to GND and is active LOW. After checking its wiring and ensuring no other service owns BCM3, configure the Raspberry Pi OS `gpio-shutdown` overlay in that OS installation's boot config, for example `dtoverlay=gpio-shutdown,gpio_pin=3,active_low=1,gpio_pull=up`. Test graceful shutdown. Pi shutdown does not disconnect the external 12 V supply.
+Check BCM8/7 against SPI0 CE0/CE1 ownership. Reeds connect only to Pi GND and their respective inputs, never 5 V or 12 V. GPIO3 shutdown is already working on this unit; preserve its existing overlay and wiring. Pi shutdown does not disconnect the external 12 V supply.
 
 Wire each **ESP32** presence switch between 3.3 V and its GPIO. HIGH means an item is present only while the switch remains held; LOW means absent.
 
@@ -108,9 +108,9 @@ First check Pi `/state` and `/hardware-debug` for a fresh heartbeat, ESP `hello`
 
 For attended actuator testing, verify each output pin and polarity with a meter, emergency buttons, driver circuitry, and actual cabinet wiring. Only then set `output_polarity_verified=true` and `enable_actuators=true`, restart the controller, and test bounded door pulses and reed open/close feedback. Keep the separate `HARDWARE_TEST_ENABLED` admin gate false except during authorized manual pulse tests. The command ending does not prove a door opened or locked.
 
-With a test item and empty assigned slot, capture and confirm two photos in `/kiosk`: main light should be on only during item photography and off during QR scanning or idle. The assigned slot should blink normally. Place the item in that slot; verify backend placement, occupied status, and steady light. On another run, put an item in a wrong available slot: the **assigned** slot should show SOS and the Pi buzzer should sound. Remove that item, confirm both warnings clear, then place it correctly. Test two wrong slots to ensure clearing one does not clear the other.
+With a test item and empty assigned slot, capture and confirm two photos in `/kiosk`: main light should stay on throughout front and back capture and turn off during QR scanning or idle. Check backend command timestamps and Pi acknowledgments if illumination is delayed. The assigned slot should blink normally. Place the item in that slot while the correct group door is open: the kiosk should show a provisional result, and the slot and item must remain reserved. Remove it again while the door is open: the warning should return. Put it back, close the group door, and wait for a fresh ESP reading; only then should the slot become occupied and the matching job start. On another run, put an item in a wrong available slot: the wrong slot and assigned slot should show SOS and the Pi buzzer should sound. Remove that item, confirm both warnings clear, then place it correctly. Test two wrong slots to ensure clearing one does not clear the other. Also lift an existing item from an occupied slot during a deposit; confirm the wrong slot and assigned slot show SOS until the item is returned.
 
-For retrieval, use an authorized one-time QR pass and check that the correct slot blinks normally. Remove an item from a different occupied slot: the **wrong** slot should show SOS, the correct slot should keep blinking, and the Pi buzzer should sound. Return it; verify the wrong slot resumes steady light and the buzzer stops. Then lift the authorized item and confirm one retrieval log, released slot, and light off. Switches indicate presence only; they cannot identify objects. Supervise these tests and reconcile contradictory switch/database states.
+For retrieval, use an authorized one-time QR pass and check that the correct slot blinks normally. Remove an item from a different occupied slot: the **wrong** slot should show SOS, the correct slot should keep blinking, and the Pi buzzer should sound. Return it; verify the wrong slot resumes steady light and the buzzer stops. Lift the authorized item, then lift another item before closing the door; retrieval must remain provisional and the second lift must warn. Return the other item, close the correct group door, and wait for a fresh ESP reading. Confirm exactly one retrieval log, a released slot, and light off. A stale or disconnected reed, a Pi restart, an ESP reboot, missing presence events, or a contradictory slot reading must prevent completion and may require operator review. Switches indicate presence only; they cannot identify objects. Supervise these tests and reconcile contradictory switch/database states.
 
 After a tested software update on the Pi:
 
@@ -126,4 +126,24 @@ journalctl -u sauli-pi-hardware.service -n 100 --no-pager
 
 ## Current hardware limits
 
-Physical door-closed power cutoff for 5 V compartment lights is not implemented. An occupied slot remains steadily lit while powered. The power button is handled by the OS shutdown overlay, not a competing GPIO3 listener. A switch transition while both ESP and Pi are offline cannot be reconstructed from a baseline snapshot. HX711 calibration and weight-based confirmation remain future work. Verify the full flow on the assembled cabinet before relying on it unattended.
+Physical door-closed power cutoff for 5 V compartment lights is not implemented. An occupied slot remains steadily lit while powered. The power button is handled by the OS shutdown overlay, not a competing GPIO3 listener. A switch transition while both ESP and Pi are offline cannot be reconstructed from a baseline snapshot. HX711 calibration and weight-based confirmation remain future work. The backend verifies group-door closure, not an individual compartment door. Verify the full flow on the assembled cabinet before relying on it unattended.
+
+## Diagnose a black screen or unexpected kiosk reload
+
+Record the exact time of the event, then compare Chromium and compositor logs with hardware-controller logs. An API error alone does not prove that the hardware service restarted the browser.
+
+```bash
+systemctl status sauli-pi-hardware.service --no-pager
+journalctl -u sauli-pi-hardware.service -b --no-pager
+journalctl --user -b --no-pager
+journalctl -b -p warning..alert --no-pager
+dmesg -T
+vcgencmd get_throttled
+free -h
+```
+
+Check the kiosk browser's user service and labwc autostart configuration for restarts at the same time. Preserve the logs before rebooting. These checks have not yet been run against the physical Pi in this session.
+
+## One-channel GPIO23/GPIO27 LED test
+
+The optional `solenoid_led_test_channel` in `/etc/sauli/hardware.json` accepts `pocket` or `medium` and rejects pulses to the other channel. It does not make an unverified output safe. With both physical solenoids disconnected, attach a correctly current-limited test LED to the chosen driver output, verify the circuit and polarity with a meter, and use the existing attended admin test command with `HARDWARE_TEST_ENABLED=true` only for the test period. Set `output_polarity_verified=true` and `enable_actuators=true` only after those checks, restart the Pi service, pulse one channel, observe the LED and log, then restore the normal configuration. Never connect an LED directly to a GPIO without a resistor. Do not test GPIO3; its shutdown function is working.

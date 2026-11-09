@@ -59,6 +59,8 @@ class EspState(BaseModel):
     frame_errors: int = Field(default=0, ge=0)
     error: str | None = Field(default=None, max_length=40)
     telemetry: Telemetry | None = None
+    boot_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,40}$")
+    telemetry_at: datetime | None = None
 
 
 class HardwareEvent(BaseModel):
@@ -93,6 +95,7 @@ class HardwareSnapshot(BaseModel):
     esp: EspState
     events: list[HardwareEvent] = Field(default_factory=list, max_length=64)
     door_workflow: DoorWorkflowState = Field(default_factory=DoorWorkflowState)
+    pending_presence_count: int = Field(default=0, ge=0, le=128)
 
 
 class Heartbeat(BaseModel):

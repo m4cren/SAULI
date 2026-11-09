@@ -6,18 +6,9 @@ import Button from "@/app/components/Button";
 import Icon from "@/app/components/Icon";
 import { useKiosk } from "../_hooks/useKioskFlow";
 import useCameraCapture from "../_hooks/useCameraCapture";
-import { setCaptureLight } from "@/libs/api/sauli";
 import FlowHeading from "./FlowHeading";
 
 type CaptureMode = "camera" | "review";
-
-// Keep requests ordered across capture steps so a stale ON cannot follow OFF.
-let captureLightQueue: Promise<void> = Promise.resolve();
-function queueCaptureLight(enabled: boolean) {
-  captureLightQueue = captureLightQueue.catch(() => {}).then(async () => {
-    try { await setCaptureLight(enabled); } catch { /* Pi timeout also turns it off. */ }
-  });
-}
 
 export default function ItemCaptureStep({ side }: { side: 1 | 2 }) {
   const kiosk = useKiosk();
@@ -34,12 +25,9 @@ export default function ItemCaptureStep({ side }: { side: 1 | 2 }) {
   }, [side, start]);
   useEffect(() => { if (kiosk.state.modal) stop(); }, [kiosk.state.modal, stop]);
   useEffect(() => {
-    const active = mode === "camera" && (status === "requesting" || status === "live") && !kiosk.state.modal;
-    if (!active) { queueCaptureLight(false); return; }
-    queueCaptureLight(true);
-    const refresh = window.setInterval(() => { queueCaptureLight(true); }, 5000);
-    return () => { window.clearInterval(refresh); queueCaptureLight(false); };
-  }, [mode, status, kiosk.state.modal]);
+    if (status === "error") kiosk.setCaptureLightFault(true);
+    else if (status === "live") kiosk.setCaptureLightFault(false);
+  }, [status, kiosk.setCaptureLightFault]);
 
   function startCamera() { setCaptureError(null); setMode("camera"); void start(); }
   async function takePhoto() {

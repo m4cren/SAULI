@@ -16,6 +16,7 @@
   "capture_light_max_seconds": 12,
   "enable_actuators": false,
   "output_polarity_verified": false,
+  "solenoid_led_test_channel": null,
   "esp_port": "/dev/serial0",
   "esp_baud": 115200
 }

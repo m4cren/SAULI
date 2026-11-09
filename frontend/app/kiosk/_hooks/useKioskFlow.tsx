@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { analyzeFoundItem, confirmAndStoreFoundItem, getHardwareWorkflow, getSlotAvailability, reconcileFoundItemReview, SauliApiError, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type SlotAvailability } from "@/libs/api/sauli";
+import { analyzeFoundItem, confirmAndStoreFoundItem, getHardwareWorkflow, getSlotAvailability, reconcileFoundItemReview, SauliApiError, setCaptureLight, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type HardwareWorkflow, type SlotAvailability } from "@/libs/api/sauli";
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots";
 import type { Compartment } from "../_types/kiosk";
@@ -9,6 +9,12 @@ import type { ImageKind } from "../_types/kiosk";
 import { initialKioskState, kioskReducer } from "./kioskReducer";
 
 const allowedImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+let lightQueue: Promise<void> = Promise.resolve();
+function queueLight(enabled: boolean) {
+  lightQueue = lightQueue.catch(() => {}).then(async () => {
+    try { await setCaptureLight(enabled); } catch { /* The Pi also has a light timeout. */ }
+  });
+}
 
 function useKioskFlow() {
   const [state, dispatch] = useReducer(kioskReducer, initialKioskState);
@@ -17,6 +23,9 @@ function useKioskFlow() {
   const [analysis, setAnalysis] = useState<FoundItemAnalysis | null>(null);
   const [busy, setBusy] = useState(false);
   const [hardwareOnline, setHardwareOnline] = useState<boolean | null>(null);
+  const [hardwarePhase, setHardwarePhase] = useState<HardwareWorkflow["phase"] | null>(null);
+  const [lightFault, setLightFault] = useState(false);
+  const lightOwned = useRef(false);
   const files = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
   const confirmationKey = useRef<string | null>(null);
   const confirmInFlight = useRef(false);
@@ -29,6 +38,28 @@ function useKioskFlow() {
   const slots: readonly Compartment[] = [...pocketCodes.map((id) => ({ id: id as Compartment["id"], size: "Pocket-size" as const, occupied: false })),
     ...mediumCodes.map((id) => ({ id: id as Compartment["id"], size: "Medium-size" as const, occupied: false }))];
   const availableCount = state.storageSize ? availability[state.storageSize]?.available ?? null : null;
+  const captureActive = state.screen.mode === "found" &&
+    (state.screen.step === "captureFront" || state.screen.step === "captureBack") &&
+    !state.modal && !lightFault;
+
+  useEffect(() => {
+    if (!captureActive) {
+      if (lightOwned.current) { lightOwned.current = false; queueLight(false); }
+      return;
+    }
+    lightOwned.current = true;
+    queueLight(true);
+    const refresh = window.setInterval(() => queueLight(true), 5000);
+    return () => window.clearInterval(refresh);
+  }, [captureActive]);
+
+  useEffect(() => {
+    const stopLight = () => {
+      if (lightOwned.current) { lightOwned.current = false; queueLight(false); }
+    };
+    window.addEventListener("pagehide", stopLight);
+    return () => window.removeEventListener("pagehide", stopLight);
+  }, []);
 
   useEffect(() => {
     if (state.screen.mode !== "found" || state.screen.step !== "summary") return;
@@ -61,6 +92,7 @@ function useKioskFlow() {
         const workflow = await getHardwareWorkflow(assignment ? { itemId: assignment.item_id } : { sessionId: retrieval!.id });
         if (!active) return;
         setHardwareOnline(workflow.hardware_online);
+        setHardwarePhase(workflow.phase);
         if (assignment) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_PLACEMENT", slot: workflow.wrong_slots[0] });
           else if (state.modal === "wrongPlacement") dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
@@ -70,7 +102,7 @@ function useKioskFlow() {
           else if (state.modal === "wrongItem") dispatch({ type: "WRONG_ITEM_RETURNED" });
           else if (workflow.retrieval_status === "completed") dispatch({ type: "CORRECT_ITEM" });
         }
-      } catch { if (active) setHardwareOnline(false); }
+      } catch { if (active) { setHardwareOnline(false); setHardwarePhase(null); } }
       finally { polling = false; }
     }
     void poll();
@@ -116,6 +148,8 @@ function useKioskFlow() {
     qrFile.current = null;
     confirmationKey.current = null;
     setAnalysis(null);
+    setHardwarePhase(null);
+    setLightFault(false);
     dispatch({ type: "RESET" });
   }
 
@@ -126,6 +160,7 @@ function useKioskFlow() {
     files.current = { front: null, back: null };
     confirmationKey.current = null;
     setAnalysis(null);
+    setLightFault(false);
     dispatch({ type: "RETAKE_PHOTOS" });
   }
 
@@ -134,6 +169,7 @@ function useKioskFlow() {
     files.current[side] = null;
     confirmationKey.current = null;
     setAnalysis(null);
+    setLightFault(false);
     dispatch({ type: "RETAKE_SIDE", side });
   }
 
@@ -273,7 +309,8 @@ function useKioskFlow() {
   }
 
   return {
-    state, slots, availableCount, availability, availabilityError, hardwareOnline, busy, analysis,
+    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, busy, analysis,
+    setCaptureLightFault: setLightFault,
     selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
     startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),

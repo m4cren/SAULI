@@ -56,6 +56,32 @@ def test_stale_telemetry_is_not_displayed_as_current_sensor_data():
     assert link.snapshot()["telemetry"] is None
 
 
+def test_esp_reboot_invalidates_prior_sensor_snapshot():
+    class Frames:
+        def __init__(self):
+            self.frames = [
+                encode_frame({"v": 1, "type": "hello", "boot_id": "boot-a"}) +
+                encode_frame({"v": 1, "type": "telemetry", "seq": 7, "slots": []}),
+                encode_frame({"v": 1, "type": "hello", "boot_id": "boot-b"}),
+            ]
+
+        def read(self, _size):
+            return self.frames.pop(0)
+
+    async def exercise():
+        link = EspLink()
+        link.serial = Frames()
+        await link.read()
+        assert link.snapshot()["telemetry"] is not None
+        assert link.snapshot()["boot_id"] == "boot-a"
+        await link.read()
+        assert link.snapshot()["telemetry"] is None
+        assert link.snapshot()["telemetry_at"] is None
+        assert link.snapshot()["boot_id"] == "boot-b"
+
+    asyncio.run(exercise())
+
+
 def test_reed_polarity_and_debounce():
     door = DoorInput(closed_level=0, debounce_seconds=0.05)
     door.update(1, now=1.0)
@@ -104,6 +130,41 @@ def test_simulation_rejects_real_command_and_expired_command(tmp_path: Path):
     row["id"] = str(uuid4())
     row["expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     assert asyncio.run(service.handle_command(row))["code"] == "expired"
+
+
+def test_led_test_allowlist_pulses_only_selected_solenoid(tmp_path: Path):
+    device = str(uuid4())
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "real", "device_id": device,
+                "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "enable_actuators": True, "output_polarity_verified": True,
+                "solenoid_led_test_channel": "pocket"}
+    service = HardwareService(config, settings)
+    service.gpio = GPIOController(simulation=True,
+                                  closed_level={"pocket": 0, "medium": 0},
+                                  active_high={name: True for name in GPIOController.OUTPUTS},
+                                  pulse_seconds=0.05, allow_outputs=True)
+    service.gpio.open()
+    service.gpio.sample_inputs()
+    service.gpio.set_simulated_door("pocket", 0)
+    service.gpio.doors["pocket"].update(0, now=time.monotonic() + 0.1)
+    expiry = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+
+    async def exercise():
+        denied = await service.handle_command({"id": str(uuid4()), "device_id": device,
+                                               "action": "pulse_medium", "expires_at": expiry})
+        assert denied["code"] == "test_channel_not_allowed"
+        assert not service.gpio.outputs["medium_solenoid"]
+        accepted = await service.handle_command({"id": str(uuid4()), "device_id": device,
+                                                 "action": "pulse_pocket", "expires_at": expiry})
+        assert accepted["code"] == "pulse_completed"
+        assert not service.gpio.outputs["pocket_solenoid"]
+        assert not service.gpio.outputs["medium_solenoid"]
+
+    asyncio.run(exercise())
+    service.gpio.close()
 
 
 def test_real_config_requires_enrolled_uuid_and_explicit_polarity(tmp_path: Path):

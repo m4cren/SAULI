@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from .protocol import FrameDecoder, encode_frame
 
 
@@ -16,6 +17,8 @@ class EspLink:
         self.last_message: dict | None = None
         self.last_telemetry: dict | None = None
         self.last_telemetry_at = 0.0
+        self.telemetry_at: str | None = None
+        self.boot_id: str | None = None
         self.error: str | None = None
 
     def connect(self) -> None:
@@ -27,6 +30,8 @@ class EspLink:
         self.last_message = None
         self.last_telemetry = None
         self.last_telemetry_at = 0.0
+        self.telemetry_at = None
+        self.boot_id = None
         self.error = None
 
     async def read(self) -> list[dict]:
@@ -42,9 +47,17 @@ class EspLink:
         for message in messages:
             self.last_seen = time.monotonic()
             self.last_message = message
+            if message["type"] == "hello":
+                next_boot = message.get("boot_id")
+                if next_boot != self.boot_id:
+                    self.last_telemetry = None
+                    self.last_telemetry_at = 0.0
+                    self.telemetry_at = None
+                self.boot_id = next_boot
             if message["type"] == "telemetry":
                 self.last_telemetry = message
                 self.last_telemetry_at = self.last_seen
+                self.telemetry_at = datetime.now(UTC).isoformat()
         return messages
 
     async def send(self, message: dict) -> None:
@@ -77,5 +90,7 @@ class EspLink:
                 "last_seen_seconds_ago": round(age, 1) if age is not None else None,
                 "frame_errors": self.decoder.dropped,
                 "error": self.error,
+                "boot_id": self.boot_id,
+                "telemetry_at": self.telemetry_at if telemetry_age is not None and telemetry_age <= 5 else None,
                 "telemetry": self.last_telemetry if self.serial is not None and
                 telemetry_age is not None and telemetry_age <= 5 else None}

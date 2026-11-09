@@ -203,10 +203,11 @@ class SupabaseKioskRepository:
                      "controller_version": version}).eq("id", device["id"]).execute())
 
     async def hardware_heartbeat(self, device: dict, snapshot: dict) -> None:
-        now = datetime.now(UTC).isoformat()
-        await run_in_threadpool(lambda: self.client().table("sauli_hardware_snapshots")
-            .upsert({"device_id": device["id"], "unit_id": device["unit_id"],
-                     "snapshot": snapshot, "received_at": now}, on_conflict="device_id").execute())
+        result = await self.rpc("sauli_reconcile_hardware_workflow", {
+            "p_device_id": device["id"], "p_snapshot": snapshot,
+        })
+        if result.get("error"):
+            raise ServiceError("HARDWARE_RECONCILIATION_FAILED", "Hardware state could not be reconciled.", 503)
 
     async def apply_hardware_presence(self, device: dict, event: dict) -> dict:
         return await self.rpc("sauli_apply_hardware_presence", {
@@ -238,10 +239,9 @@ class SupabaseKioskRepository:
                     session = rows[0] if owned else None
             if (item_id and item is None) or (session_id and session is None):
                 raise ServiceError("HARDWARE_WORKFLOW_NOT_FOUND", "Workflow not found for this kiosk.", 404)
-            query = (client.table("sauli_hardware_incidents").select("slot_id,kind")
-                .eq("unit_id", device["unit_id"]).eq("active", True))
-            query = query.eq("found_item_id", item_id) if item_id else query.eq("retrieval_session_id", session_id)
-            incidents = query.execute().data or [] if (item_id or session_id) else []
+            incidents = (client.table("sauli_hardware_incidents").select("slot_id,kind")
+                .eq("unit_id", device["unit_id"]).eq("active", True)
+                .execute().data or []) if (item_id or session_id) else []
             codes = {}
             if incidents:
                 slots = (client.table("storage_slots").select("id,code")
@@ -250,6 +250,12 @@ class SupabaseKioskRepository:
             snapshots = (client.table("sauli_hardware_snapshots").select("received_at,snapshot")
                 .eq("unit_id", device["unit_id"]).order("received_at", desc=True)
                 .limit(1).execute().data or [])
+            transaction_rows = (client.table("sauli_hardware_transactions")
+                .select("phase,last_door,found_item_id,retrieval_session_id")
+                .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
+            transaction = next((row for row in transaction_rows
+                if (item_id and row["found_item_id"] == item_id) or
+                   (session_id and row["retrieval_session_id"] == session_id)), None)
             online = False
             if snapshots:
                 age = (datetime.now(UTC) - datetime.fromisoformat(
@@ -258,14 +264,17 @@ class SupabaseKioskRepository:
             return {"placement_status": item["placement_status"] if item else None,
                     "retrieval_status": session["status"] if session else None,
                     "wrong_slots": [codes.get(row["slot_id"], "unknown") for row in incidents],
-                    "hardware_online": online}
+                    "hardware_online": online,
+                    "phase": transaction["phase"] if transaction else "awaiting_door_open",
+                    "door": transaction["last_door"] if transaction else "unknown"}
         return await run_in_threadpool(fetch)
 
     async def claim_hardware_commands(self, device: dict) -> list[dict]:
         rows = await self.rpc("sauli_claim_hardware_commands", {
             "p_device_id": device["id"], "p_unit_id": device["unit_id"]})
         return [{"id": row["id"], "device_id": row["device_id"],
-                 "action": row["action"], "expires_at": row["expires_at"]}
+                 "action": row["action"], "expires_at": row["expires_at"],
+                 "created_at": row["created_at"]}
                 for row in (rows or [])]
 
     async def ack_hardware_command(self, device: dict, command_id: str,

@@ -47,6 +47,9 @@ def load_hardware(path: Path) -> dict:
         raise ValueError("Hardware mode must be explicitly real or simulation")
     if value.get("enable_actuators") and not value.get("output_polarity_verified"):
         raise ValueError("Verify output polarity before enabling actuators")
+    test_channel = value.get("solenoid_led_test_channel")
+    if test_channel not in (None, "pocket", "medium"):
+        raise ValueError("solenoid_led_test_channel must be pocket, medium, or null")
     for key, default, minimum, maximum in (
         ("gpio_sample_seconds", 0.05, 0.02, 0.2),
         ("telemetry_interval_seconds", 0.5, 0.25, 30),
@@ -131,6 +134,7 @@ class HardwareService:
                 "esp": self.esp.snapshot() if self.settings["mode"] == "real" else
                 {"connection": "simulated", "telemetry": None},
                 "events": self.events[:64],
+                  "pending_presence_count": len(self._pending_presence),
                 "door_workflow": self.door_workflow.snapshot()}
 
     def record_door_changes(self) -> None:
@@ -181,6 +185,9 @@ class HardwareService:
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
+            test_channel = self.settings.get("solenoid_led_test_channel")
+            if test_channel is not None and door != test_channel:
+                raise ValueError("test_channel_not_allowed")
             self.door_workflow.start(
                 command_id, door, self.gpio.doors[door].snapshot()["door"])
             self.event("command_accepted", command_id)
@@ -196,6 +203,7 @@ class HardwareService:
             code = str(exc)
             if code not in {"expired", "device_mismatch", "simulation_mode",
                             "actuators_disabled", "outputs_unverified", "unsupported_action",
+                            "test_channel_not_allowed",
                             "door_workflow_busy", "door_not_closed"}:
                 code = "invalid_command"
             return {"id": command_id, "status": "failed", "code": code}
