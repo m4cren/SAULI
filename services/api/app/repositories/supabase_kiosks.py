@@ -208,6 +208,59 @@ class SupabaseKioskRepository:
             .upsert({"device_id": device["id"], "unit_id": device["unit_id"],
                      "snapshot": snapshot, "received_at": now}, on_conflict="device_id").execute())
 
+    async def apply_hardware_presence(self, device: dict, event: dict) -> dict:
+        return await self.rpc("sauli_apply_hardware_presence", {
+            "p_device_id": device["id"], "p_event_id": event["event_id"],
+            "p_boot_id": event["boot_id"], "p_sequence": event["seq"],
+            "p_slot_code": event["slot"], "p_kind": event["kind"],
+            "p_present": event["present"],
+        })
+
+    async def hardware_guidance(self, device: dict) -> dict:
+        return await self.rpc("sauli_hardware_guidance", {"p_unit_id": device["unit_id"]})
+
+    async def hardware_workflow(self, device: dict, *, item_id: str | None,
+                                session_id: str | None) -> dict:
+        def fetch():
+            client = self.client()
+            item = None
+            session = None
+            if item_id:
+                rows = (client.table("found_items").select("id,unit_id,placement_status")
+                    .eq("id", item_id).eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
+                item = rows[0] if rows else None
+            if session_id:
+                rows = (client.table("retrieval_sessions").select("id,found_item_id,status")
+                    .eq("id", session_id).limit(1).execute().data or [])
+                if rows:
+                    owned = (client.table("found_items").select("id").eq("id", rows[0]["found_item_id"])
+                        .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
+                    session = rows[0] if owned else None
+            if (item_id and item is None) or (session_id and session is None):
+                raise ServiceError("HARDWARE_WORKFLOW_NOT_FOUND", "Workflow not found for this kiosk.", 404)
+            query = (client.table("sauli_hardware_incidents").select("slot_id,kind")
+                .eq("unit_id", device["unit_id"]).eq("active", True))
+            query = query.eq("found_item_id", item_id) if item_id else query.eq("retrieval_session_id", session_id)
+            incidents = query.execute().data or [] if (item_id or session_id) else []
+            codes = {}
+            if incidents:
+                slots = (client.table("storage_slots").select("id,code")
+                    .eq("unit_id", device["unit_id"]).execute().data or [])
+                codes = {row["id"]: row["code"] for row in slots}
+            snapshots = (client.table("sauli_hardware_snapshots").select("received_at,snapshot")
+                .eq("unit_id", device["unit_id"]).order("received_at", desc=True)
+                .limit(1).execute().data or [])
+            online = False
+            if snapshots:
+                age = (datetime.now(UTC) - datetime.fromisoformat(
+                    snapshots[0]["received_at"].replace("Z", "+00:00"))).total_seconds()
+                online = age <= 5 and ((snapshots[0]["snapshot"].get("esp") or {}).get("connection") == "online")
+            return {"placement_status": item["placement_status"] if item else None,
+                    "retrieval_status": session["status"] if session else None,
+                    "wrong_slots": [codes.get(row["slot_id"], "unknown") for row in incidents],
+                    "hardware_online": online}
+        return await run_in_threadpool(fetch)
+
     async def claim_hardware_commands(self, device: dict) -> list[dict]:
         rows = await self.rpc("sauli_claim_hardware_commands", {
             "p_device_id": device["id"], "p_unit_id": device["unit_id"]})
@@ -234,6 +287,15 @@ class SupabaseKioskRepository:
             .insert({"device_id": device["id"], "unit_id": device["unit_id"],
                      "action": action, "expires_at": expires.isoformat()})
             .select("id,status,expires_at").execute().data or [])
+        return rows[0]
+
+    async def enqueue_capture_light(self, device: dict, enabled: bool) -> dict:
+        expires = datetime.now(UTC) + timedelta(seconds=10)
+        rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_commands")
+            .insert({"device_id": device["id"], "unit_id": device["unit_id"],
+                     "action": "capture_light_on" if enabled else "capture_light_off",
+                     "expires_at": expires.isoformat()})
+            .select("id,status").execute().data or [])
         return rows[0]
 
     async def public_hardware_status(self) -> dict:

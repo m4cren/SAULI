@@ -7,6 +7,7 @@ const allowed = [
   /^storage-slots\/availability$/,
   /^retrieval-sessions\/validate$/,
   /^retrieval-sessions\/[0-9a-f-]{36}\/simulate-(completion|wrong-item|item-returned)$/,
+  /^hardware\/(workflow|capture-light)$/,
 ];
 
 async function forward(request: Request, context: { params: Promise<{ path: string[] }> }) {

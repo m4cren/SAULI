@@ -23,6 +23,7 @@ export interface ReviewFields {
 export interface KioskState {
   screen: KioskScreen;
   modal: KioskModal;
+  wrongSlot: string | null;
   images: Record<ImageKind, string | null>;
   foundLocation: string;
   review: ReviewFields;

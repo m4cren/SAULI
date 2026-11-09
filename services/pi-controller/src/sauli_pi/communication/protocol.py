@@ -4,7 +4,8 @@ import json
 
 VERSION = 1
 MAX_FRAME = 4096
-ALLOWED_TYPES = {"hello", "status", "ping", "pong", "telemetry", "command", "ack", "error"}
+ALLOWED_TYPES = {"hello", "status", "ping", "pong", "telemetry", "command", "ack", "error",
+                 "event", "event_ack", "snapshot"}
 
 
 class FrameError(ValueError):

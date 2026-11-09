@@ -13,6 +13,7 @@
   "telemetry_min_gap_seconds": 0.15,
   "door_open_timeout_seconds": 5,
   "door_close_timeout_seconds": 30,
+  "capture_light_max_seconds": 12,
   "enable_actuators": false,
   "output_polarity_verified": false,
   "esp_port": "/dev/serial0",

@@ -12,7 +12,7 @@ from sauli_pi.communication.esp32_serial import EspLink
 from sauli_pi.communication.protocol import FrameDecoder, FrameError, encode_frame
 from sauli_pi.config import Config
 from sauli_pi.hardware.controller import DoorInput, GPIOController
-from sauli_pi.hardware_service import HardwareService, load_hardware
+from sauli_pi.hardware_service import HardwareService, load_hardware, valid_presence_event
 from sauli_pi.workflows.door import DoorWorkflow
 
 
@@ -274,7 +274,10 @@ def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path
                 "output_active_high": {name: True for name in GPIOController.OUTPUTS},
                 "telemetry_interval_seconds": 0.05, "telemetry_min_gap_seconds": 0.02}
     service = HardwareService(config, settings)
-    commands = [{"id": str(uuid4())}, {"id": str(uuid4())}]
+    commands = [
+        {"id": str(uuid4()), "created_at": "2026-11-09T12:00:02Z"},
+        {"id": str(uuid4()), "created_at": "2026-11-09T12:00:01Z"},
+    ]
     requests = []
     executions = []
 
@@ -301,7 +304,7 @@ def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path
         await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(exercise())
-    assert executions == [row["id"] for row in commands]
+    assert executions == [row["id"] for row in reversed(commands)]
     assert requests[:5] == ["/api/hardware/heartbeat", "/api/hardware/ack",
                             "/api/hardware/ack", "/api/hardware/ack", "/api/hardware/heartbeat"]
 
@@ -345,3 +348,85 @@ def test_silent_esp_read_does_not_block_gpio_sampling(tmp_path: Path):
     asyncio.run(exercise())
     assert reads == 1
     assert samples >= 4
+
+
+def test_invalid_esp_presence_does_not_enter_backend_retry_queue(tmp_path: Path):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "simulation", "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS}}
+    service = HardwareService(config, settings)
+    service.esp.serial = object()
+    invalid = {"v": 1, "type": "event", "event_id": "boot-1", "boot_id": "boot",
+               "seq": 1, "slot": "P-01", "kind": "ITEM_REMOVED", "present": True}
+    valid = {**invalid, "event_id": "boot-2", "seq": 2, "slot": "P-02",
+             "kind": "ITEM_PRESENT"}
+    assert valid_presence_event(invalid) is False
+    assert valid_presence_event({**valid, "seq": True}) is False
+    assert valid_presence_event({**valid, "slot": "P-99"}) is False
+    assert valid_presence_event(valid) is True
+    sent = []
+    reads = 0
+
+    async def read():
+        nonlocal reads
+        reads += 1
+        return [invalid, valid] if reads == 1 else []
+
+    async def send(message):
+        sent.append(message)
+
+    service.esp.read = read
+    service.esp.send = send
+
+    async def exercise():
+        task = asyncio.create_task(service._esp_loop())
+        await asyncio.sleep(0.08)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert list(service._pending_presence) == ["boot-2"]
+    assert {"v": 1, "type": "event_ack", "event_id": "boot-1"} in sent
+    assert {"v": 1, "type": "snapshot"} in sent
+
+
+def test_guidance_clears_lights_and_buzzer_on_invalid_or_lost_backend(tmp_path: Path):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "simulation", "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "enable_actuators": True}
+    service = HardwareService(config, settings)
+    service.gpio.allow_outputs = True
+    service.esp.serial = object()
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    service.esp.send = send
+    modes = {f"P-{number:02d}": "OFF" for number in range(1, 9)}
+    modes.update({f"M-{number:02d}": "OFF" for number in range(1, 5)})
+    modes["P-01"] = "NORMAL_BLINK"
+    modes["P-02"] = "SOS_BLINK"
+
+    async def exercise():
+        await service._apply_guidance({"modes": modes, "buzzer": True})
+        assert service.gpio.outputs["buzzer"] is True
+        assert sent[-1]["modes"] == modes
+        wrong_slot_modes = {**modes, "P-01": "OFF", "P-99": "SOS_BLINK"}
+        wrong_slot_modes.pop("P-02")
+        await service._apply_guidance({"modes": wrong_slot_modes, "buzzer": True})
+        assert service.gpio.outputs["buzzer"] is False
+        assert set(sent[-1]["modes"].values()) == {"OFF"}
+        await service._apply_guidance({"modes": modes, "buzzer": True})
+        await service._apply_guidance({"modes": {"P-01": "STEADY_ON"}})
+        assert service.gpio.outputs["buzzer"] is False
+        assert set(sent[-1]["modes"].values()) == {"OFF"}
+        assert len(sent[-1]["modes"]) == 12
+        await service._apply_guidance({"modes": modes, "buzzer": True})
+        await service._clear_guidance()
+        assert sent[-1]["modes"]["P-02"] == "OFF"
+
+    asyncio.run(exercise())

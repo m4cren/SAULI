@@ -32,7 +32,7 @@ export default function StatusModal({ type }: { type: "cancel" | "wrongPlacement
   const wrongPlacement = type === "wrongPlacement";
   const intended = kiosk.state.validatedRetrieval;
   const assignedCompartment = kiosk.state.assignment?.slot_code ?? "the assigned position";
-  const wrongCompartment = kiosk.slots.find((slot) => slot.id !== assignedCompartment)?.id ?? "another position";
+  const wrongCompartment = kiosk.state.wrongSlot ?? "another position";
   return <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/45 p-4">
     <div ref={modalRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="kiosk-modal-title" aria-describedby="kiosk-modal-description" className="w-full max-w-[600px] rounded-xl bg-white p-5 text-center shadow-xl sm:p-8">
       <span className={`mx-auto flex size-16 items-center justify-center rounded-full ${cancel ? "bg-[#ffedcc] text-[#a26b13]" : "bg-[#f4e1e1] text-red-600"}`}><Icon name={cancel ? "warning" : "close"} size={36} /></span>
@@ -40,10 +40,10 @@ export default function StatusModal({ type }: { type: "cancel" | "wrongPlacement
       <p id="kiosk-modal-description" className="mt-2 text-sm text-[#444]">{cancel ? "Your selected images and entered details will be discarded from this browser session." : wrongPlacement ? `The item was placed in ${wrongCompartment} instead of ${assignedCompartment}.` : "The removed item is not the authorized item. Return it to its original position before continuing."}</p>
       {type === "wrongItem" && <>
         <div className="mt-5 overflow-hidden rounded-lg border border-[#d5d5d5] text-left text-sm">
-          <div className="flex justify-between gap-4 border-b border-[#d5d5d5] p-3"><span>Lifted item</span><strong>Unverified</strong></div>
+          <div className="flex justify-between gap-4 border-b border-[#d5d5d5] p-3"><span>Lifted from</span><strong>{wrongCompartment}</strong></div>
           <div className="flex justify-between gap-4 p-3"><span>Your item</span><strong>{intended?.slot_code ?? "Assigned position"} · {intended?.item_summary ?? "Confirmed item"}</strong></div>
         </div>
-        <div className="mt-4 rounded-lg border border-red-300 bg-[#ffe4e4] p-4 text-left text-sm text-red-700"><strong>Return the item to its original position.</strong><p className="mt-1">The door remains in the simulated open state. Your item remains in {intended?.slot_code ?? "its assigned position"}.</p></div>
+        <div className="mt-4 rounded-lg border border-red-300 bg-[#ffe4e4] p-4 text-left text-sm text-red-700"><strong>Return the item to {wrongCompartment}.</strong><p className="mt-1">Your item remains in {intended?.slot_code ?? "its assigned position"}.</p></div>
         <p role="status" className="mt-4 flex items-center justify-center gap-2 text-xs text-[#52676a]"><span aria-hidden="true" className="size-4 animate-spin rounded-full border-2 border-[#c9dede] border-t-[#0b474f]" />Waiting for item return…</p>
         <DesktopTestControls inModal />
       </>}

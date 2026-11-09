@@ -7,6 +7,7 @@ const emptyReview: ReviewFields = { name: "", summary: "", category: "", color: 
 export const initialKioskState: KioskState = {
   screen: { mode: "home" },
   modal: null,
+  wrongSlot: null,
   images: { front: null, back: null, qr: null },
   foundLocation: "",
   review: emptyReview,
@@ -41,7 +42,7 @@ export type KioskAction =
   | { type: "RETAKE_SIDE"; side: "front" | "back" }
   | { type: "FOUND_CONFIRMED"; assignment: ConfirmedItem }
   | { type: "PLACEMENT_SUCCEEDED"; assignment: ConfirmedItem }
-  | { type: "WRONG_PLACEMENT" }
+  | { type: "WRONG_PLACEMENT"; slot?: string }
   | { type: "WRONG_PLACEMENT_REMOVED" }
   | { type: "CORRECT_PLACEMENT" }
   | { type: "DOOR_CLOSED" }
@@ -50,7 +51,7 @@ export type KioskAction =
   | { type: "QR_INVALID"; message: string; code?: string }
   | { type: "TRY_ANOTHER_QR" }
   | { type: "SHOW_ITEM_LOCATION" }
-  | { type: "WRONG_ITEM" }
+  | { type: "WRONG_ITEM"; slot?: string }
   | { type: "WRONG_ITEM_RETURNED" }
   | { type: "CORRECT_ITEM" }
   | { type: "CANCEL_REQUESTED" }
@@ -90,8 +91,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
       ? { ...state, screen: { mode: "found", step: "placement" }, assignment: action.assignment, images: { ...state.images, front: null, back: null }, error: null } : state;
     case "PLACEMENT_SUCCEEDED": return screen.mode === "found" && screen.step === "placement"
       ? { ...state, screen: { mode: "found", step: "stored" }, assignment: action.assignment, error: null } : state;
-    case "WRONG_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, modal: "wrongPlacement" } : state;
-    case "WRONG_PLACEMENT_REMOVED": return modal === "wrongPlacement" ? { ...state, modal: null } : state;
+    case "WRONG_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, modal: "wrongPlacement", wrongSlot: action.slot ?? null } : state;
+    case "WRONG_PLACEMENT_REMOVED": return modal === "wrongPlacement" ? { ...state, modal: null, wrongSlot: null } : state;
     case "CORRECT_PLACEMENT": return screen.mode === "found" && screen.step === "placement" && !modal ? { ...state, screen: { mode: "found", step: "placementCorrect" } } : state;
     case "DOOR_CLOSED": return screen.mode === "found" && screen.step === "placementCorrect" ? { ...state, screen: { mode: "found", step: "stored" } } : state;
     case "QR_CHECK_STARTED": return screen.mode === "retrieve" && screen.step === "uploadQr" ? { ...state, screen: { mode: "retrieve", step: "verifyingQr" }, error: null } : state;
@@ -99,8 +100,8 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     case "QR_INVALID": return screen.mode === "retrieve" && screen.step === "verifyingQr" ? { ...state, screen: { mode: "retrieve", step: "invalidQr" }, error: action.message, qrErrorCode: action.code ?? null } : state;
     case "TRY_ANOTHER_QR": return screen.mode === "retrieve" && screen.step === "invalidQr" ? { ...state, screen: { mode: "retrieve", step: "uploadQr" }, images: { ...state.images, qr: null }, error: null, qrErrorCode: null } : state;
     case "SHOW_ITEM_LOCATION": return screen.mode === "retrieve" && screen.step === "qrVerified" ? { ...state, screen: { mode: "retrieve", step: "itemLocation" } } : state;
-    case "WRONG_ITEM": return screen.mode === "retrieve" && screen.step === "itemLocation" && !modal ? { ...state, modal: "wrongItem" } : state;
-    case "WRONG_ITEM_RETURNED": return modal === "wrongItem" ? { ...state, modal: null } : state;
+    case "WRONG_ITEM": return screen.mode === "retrieve" && screen.step === "itemLocation" && !modal ? { ...state, modal: "wrongItem", wrongSlot: action.slot ?? null } : state;
+    case "WRONG_ITEM_RETURNED": return modal === "wrongItem" ? { ...state, modal: null, wrongSlot: null } : state;
     case "CORRECT_ITEM": return screen.mode === "retrieve" && screen.step === "itemLocation" && !modal ? { ...state, screen: { mode: "retrieve", step: "retrieved" }, validatedRetrieval: null } : state;
     case "CANCEL_REQUESTED": return screen.mode !== "home" && !modal ? { ...state, modal: "cancel" } : state;
     case "CANCEL_STAY": return modal === "cancel" ? { ...state, modal: null } : state;

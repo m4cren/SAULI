@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { analyzeFoundItem, confirmAndStoreFoundItem, getSlotAvailability, reconcileFoundItemReview, SauliApiError, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type SlotAvailability } from "@/libs/api/sauli";
+import { analyzeFoundItem, confirmAndStoreFoundItem, getHardwareWorkflow, getSlotAvailability, reconcileFoundItemReview, SauliApiError, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type SlotAvailability } from "@/libs/api/sauli";
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots";
 import type { Compartment } from "../_types/kiosk";
@@ -16,6 +16,7 @@ function useKioskFlow() {
   const [availabilityError, setAvailabilityError] = useState(false);
   const [analysis, setAnalysis] = useState<FoundItemAnalysis | null>(null);
   const [busy, setBusy] = useState(false);
+  const [hardwareOnline, setHardwareOnline] = useState<boolean | null>(null);
   const files = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
   const confirmationKey = useRef<string | null>(null);
   const confirmInFlight = useRef(false);
@@ -46,6 +47,36 @@ function useKioskFlow() {
       Object.values(urls.current).forEach((url) => { if (url) URL.revokeObjectURL(url); });
     };
   }, []);
+
+  useEffect(() => {
+    const assignment = state.screen.mode === "found" && state.screen.step === "placement" ? state.assignment : null;
+    const retrieval = state.screen.mode === "retrieve" && state.screen.step === "itemLocation" ? state.validatedRetrieval : null;
+    if (!assignment && !retrieval) return;
+    let active = true;
+    let polling = false;
+    async function poll() {
+      if (polling) return;
+      polling = true;
+      try {
+        const workflow = await getHardwareWorkflow(assignment ? { itemId: assignment.item_id } : { sessionId: retrieval!.id });
+        if (!active) return;
+        setHardwareOnline(workflow.hardware_online);
+        if (assignment) {
+          if (workflow.wrong_slots.length) dispatch({ type: "WRONG_PLACEMENT", slot: workflow.wrong_slots[0] });
+          else if (state.modal === "wrongPlacement") dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
+          else if (workflow.placement_status === "placed") dispatch({ type: "PLACEMENT_SUCCEEDED", assignment: { ...assignment, placement_status: "placed", slot_status: "occupied" } });
+        } else if (retrieval) {
+          if (workflow.wrong_slots.length) dispatch({ type: "WRONG_ITEM", slot: workflow.wrong_slots[0] });
+          else if (state.modal === "wrongItem") dispatch({ type: "WRONG_ITEM_RETURNED" });
+          else if (workflow.retrieval_status === "completed") dispatch({ type: "CORRECT_ITEM" });
+        }
+      } catch { if (active) setHardwareOnline(false); }
+      finally { polling = false; }
+    }
+    void poll();
+    const interval = window.setInterval(() => void poll(), 1000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [state.screen, state.assignment, state.validatedRetrieval, state.modal]);
 
   function clearTimer() {
     if (timer.current) clearTimeout(timer.current);
@@ -242,7 +273,7 @@ function useKioskFlow() {
   }
 
   return {
-    state, slots, availableCount, availability, availabilityError, busy, analysis,
+    state, slots, availableCount, availability, availabilityError, hardwareOnline, busy, analysis,
     selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
     startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),

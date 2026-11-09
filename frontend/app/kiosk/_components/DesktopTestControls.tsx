@@ -5,7 +5,8 @@ import { useKiosk } from "../_hooks/useKioskFlow";
 export default function DesktopTestControls({ inModal = false }: { inModal?: boolean }) {
   const kiosk = useKiosk();
   const { screen, modal } = kiosk.state;
-  const wrongCompartment = kiosk.slots.find((slot) => slot.id !== kiosk.state.assignment?.slot_code)?.id ?? "another position";
+  const wrongCompartment = kiosk.state.wrongSlot ?? "another position";
+  if (process.env.NODE_ENV === "production") return null;
   if (modal && !inModal) return null;
   const controls: { label: string; action: () => void }[] = [];
   if (modal === "wrongPlacement") controls.push({ label: `Simulate item removed from ${wrongCompartment}`, action: kiosk.simulatePlacementRemoved });

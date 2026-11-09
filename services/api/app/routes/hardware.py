@@ -8,12 +8,13 @@ from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.dependencies import get_admin_user
-from app.auth.kiosk import get_device
+from app.auth.kiosk import get_device, get_kiosk_session
 from app.core.errors import ServiceError
 from app.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/api/hardware", tags=["hardware"])
 Device = Annotated[dict, Depends(get_device)]
+Kiosk = Annotated[dict, Depends(get_kiosk_session)]
 Admin = Annotated[UserResponse, Depends(get_admin_user)]
 
 
@@ -112,12 +113,53 @@ class TestCommand(BaseModel):
     action: Literal["pulse_pocket", "pulse_medium"]
 
 
+class PresenceEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    boot_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")
+    seq: int = Field(ge=1)
+    slot: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    kind: Literal["SENSOR_SNAPSHOT", "ITEM_PRESENT", "ITEM_REMOVED"]
+    present: bool
+
+
+class CaptureLightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+
+
 @router.post("/heartbeat")
 async def heartbeat(request: Request, payload: Heartbeat, device: Device):
     await request.app.state.kiosks.hardware_heartbeat(
         device, payload.snapshot.model_dump(mode="json"))
     commands = await request.app.state.kiosks.claim_hardware_commands(device)
-    return {"device_id": device["id"], "commands": commands}
+    guidance = await request.app.state.kiosks.hardware_guidance(device)
+    return {"device_id": device["id"], "commands": commands, "guidance": guidance}
+
+
+@router.post("/presence")
+async def presence(request: Request, payload: PresenceEvent, device: Device):
+    if payload.kind == "ITEM_PRESENT" and not payload.present or payload.kind == "ITEM_REMOVED" and payload.present:
+        raise ServiceError("INVALID_SENSOR_EVENT", "The sensor event is inconsistent.", 422)
+    result = await request.app.state.kiosks.apply_hardware_presence(device, payload.model_dump())
+    if result.get("error"):
+        raise ServiceError("SENSOR_EVENT_REJECTED", "The sensor event could not be recorded.", 422)
+    return result
+
+
+@router.get("/workflow")
+async def workflow(request: Request, kiosk: Kiosk, item_id: UUID | None = None,
+                   session_id: UUID | None = None):
+    if (item_id is None) == (session_id is None):
+        raise ServiceError("INVALID_WORKFLOW", "Select one active workflow.", 422)
+    return await request.app.state.kiosks.hardware_workflow(
+        kiosk, item_id=str(item_id) if item_id else None,
+        session_id=str(session_id) if session_id else None)
+
+
+@router.post("/capture-light", status_code=202)
+async def capture_light(request: Request, payload: CaptureLightRequest, kiosk: Kiosk):
+    return await request.app.state.kiosks.enqueue_capture_light(kiosk, payload.enabled)
 
 
 @router.post("/ack")

@@ -4,12 +4,13 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI
 from sauli_pi.communication.backend_client import DeviceApiError, request_json
@@ -19,6 +20,25 @@ from sauli_pi.hardware.controller import GPIOController
 from sauli_pi.workflows.door import DoorWorkflow
 
 LOG = logging.getLogger("sauli.hardware")
+PRESENCE_SLOTS = {f"P-{number:02d}" for number in range(1, 9)} | {
+    f"M-{number:02d}" for number in range(1, 5)}
+
+
+def valid_presence_event(event: dict) -> bool:
+    """Match FastAPI's presence contract before an event enters the retry queue."""
+    event_id = event.get("event_id")
+    boot_id = event.get("boot_id")
+    kind = event.get("kind")
+    present = event.get("present")
+    return (
+        isinstance(event_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", event_id) is not None
+        and isinstance(boot_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,40}", boot_id) is not None
+        and type(event.get("seq")) is int and event["seq"] >= 1
+        and isinstance(event.get("slot"), str) and event["slot"] in PRESENCE_SLOTS
+        and isinstance(kind, str) and kind in {"SENSOR_SNAPSHOT", "ITEM_PRESENT", "ITEM_REMOVED"}
+        and isinstance(present, bool)
+        and (kind == "SENSOR_SNAPSHOT" or present == (kind == "ITEM_PRESENT"))
+    )
 
 
 def load_hardware(path: Path) -> dict:
@@ -31,6 +51,7 @@ def load_hardware(path: Path) -> dict:
         ("gpio_sample_seconds", 0.05, 0.02, 0.2),
         ("telemetry_interval_seconds", 0.5, 0.25, 30),
         ("telemetry_min_gap_seconds", 0.15, 0.1, 5),
+        ("capture_light_max_seconds", 12, 3, 30),
     ):
         try:
             number = float(value.get(key, default))
@@ -75,6 +96,12 @@ class HardwareService:
         self._observed_at: str | None = None
         self._publish_signal = asyncio.Event()
         self._pending_acks: deque[dict] = deque()
+        self._pending_presence: dict[str, dict] = {}
+        self._last_guidance: dict | None = None
+        self._last_guidance_sent = 0.0
+        self._last_esp_connection = False
+        self._buzzer_started: float | None = None
+        self._capture_light_deadline: float | None = None
         self._sample_seconds = float(settings.get("gpio_sample_seconds", 0.05))
         self._telemetry_seconds = float(settings.get("telemetry_interval_seconds", 0.5))
         self._min_gap_seconds = float(settings.get("telemetry_min_gap_seconds", 0.15))
@@ -142,7 +169,15 @@ class HardwareService:
                 raise ValueError("simulation_mode")
             if not self.settings.get("enable_actuators", False):
                 raise ValueError("actuators_disabled")
+            if not self.gpio.allow_outputs:
+                raise ValueError("outputs_unverified")
             action = row.get("action")
+            if action in {"capture_light_on", "capture_light_off"}:
+                enabled = action == "capture_light_on"
+                self.gpio.set_output("main_light", enabled)
+                self._capture_light_deadline = (time.monotonic() + float(self.settings.get("capture_light_max_seconds", 12))) if enabled else None
+                self.event("command_completed", command_id)
+                return {"id": command_id, "status": "acked", "code": "light_updated"}
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
@@ -160,7 +195,7 @@ class HardwareService:
             self.event("command_rejected", command_id)
             code = str(exc)
             if code not in {"expired", "device_mismatch", "simulation_mode",
-                            "actuators_disabled", "unsupported_action",
+                            "actuators_disabled", "outputs_unverified", "unsupported_action",
                             "door_workflow_busy", "door_not_closed"}:
                 code = "invalid_command"
             return {"id": command_id, "status": "failed", "code": code}
@@ -173,6 +208,10 @@ class HardwareService:
 
     async def _sample_loop(self) -> None:
         while True:
+            if self._capture_light_deadline is not None and time.monotonic() >= self._capture_light_deadline:
+                self._capture_light_deadline = None
+                self._capture_light_off()
+                self._changed()
             self.gpio.sample_inputs()
             self.record_door_changes()
             await asyncio.sleep(self._sample_seconds)
@@ -186,6 +225,7 @@ class HardwareService:
                     next_connect = time.monotonic() + 5
                     try:
                         await asyncio.to_thread(self.esp.connect)
+                        self._last_esp_connection = False
                         self._changed()
                     except (OSError, ImportError):
                         if self.esp.error != "serial_unavailable":
@@ -200,6 +240,30 @@ class HardwareService:
             for message in messages:
                 if message["type"] == "hello":
                     self.event("esp_hello")
+                    self._last_esp_connection = False
+                    try:
+                        await self.esp.send({"v": 1, "type": "snapshot"})
+                    except ConnectionError:
+                        self.event("esp_disconnected")
+                elif message["type"] == "event":
+                    event = {key: message.get(key) for key in
+                             ("event_id", "boot_id", "seq", "slot", "kind", "present")}
+                    if valid_presence_event(event):
+                        if len(self._pending_presence) < 128 or event["event_id"] in self._pending_presence:
+                            self._pending_presence[event["event_id"]] = event
+                            self._publish_signal.set()
+                    else:
+                        # An API 422 would otherwise block all later events and heartbeats.
+                        # Discard the bad frame and ask the ESP for a fresh baseline.
+                        self.esp.error = "invalid_presence_event"
+                        self._changed()
+                        event_id = event.get("event_id")
+                        if isinstance(event_id, str) and 0 < len(event_id) <= 80:
+                            try:
+                                await self.esp.send({"v": 1, "type": "event_ack", "event_id": event_id})
+                                await self.esp.send({"v": 1, "type": "snapshot"})
+                            except ConnectionError:
+                                self.event("esp_disconnected")
                 else:
                     self._changed()
                 if message["type"] == "ping":
@@ -249,6 +313,16 @@ class HardwareService:
                     await asyncio.to_thread(request_json, self.config.backend_url,
                                             "/api/hardware/ack", self._pending_acks[0], self.credential)
                     self._pending_acks.popleft()
+                while self._pending_presence:
+                    event_id, event = next(iter(self._pending_presence.items()))
+                    await asyncio.to_thread(request_json, self.config.backend_url,
+                                            "/api/hardware/presence", event, self.credential)
+                    self._pending_presence.pop(event_id, None)
+                    if self.esp.serial is not None:
+                        try:
+                            await self.esp.send({"v": 1, "type": "event_ack", "event_id": event_id})
+                        except ConnectionError:
+                            pass  # ESP resends; the backend deduplicates the event ID.
                 sent_sequence = self._sequence
                 result = await asyncio.to_thread(
                     request_json, self.config.backend_url, "/api/hardware/heartbeat",
@@ -260,7 +334,12 @@ class HardwareService:
                 last_success = time.monotonic()
                 backoff = 1.0
                 retry_at = 0.0
-                for row in result.get("commands", []):
+                await self._apply_guidance(result.get("guidance") or {})
+                # UPDATE ... RETURNING in the backend claim RPC does not preserve
+                # creation order. Apply queued light transitions in request order.
+                for row in sorted(result.get("commands", []),
+                                  key=lambda command: (command.get("created_at") or "",
+                                                       command.get("id") or "")):
                     ack = await self.handle_command(row)
                     self._pending_acks.append(ack)
                 while self._pending_acks:
@@ -268,18 +347,82 @@ class HardwareService:
                                             "/api/hardware/ack", self._pending_acks[0], self.credential)
                     self._pending_acks.popleft()
             except DeviceApiError:
+                self._set_buzzer(False)
+                self._capture_light_deadline = None
+                self._capture_light_off()
+                await self._clear_guidance()
                 if self.backend != "offline":
                     self.backend = "offline"
                     self.event("backend_unavailable")
                 retry_at = time.monotonic() + backoff
                 backoff = min(backoff * 2, 30)
             except Exception:
+                self._set_buzzer(False)
+                self._capture_light_deadline = None
+                self._capture_light_off()
+                await self._clear_guidance()
                 if self.backend != "offline":
                     self.backend = "offline"
                     self.event("backend_unavailable")
                 LOG.exception("Hardware publication failed")
                 retry_at = time.monotonic() + backoff
                 backoff = min(backoff * 2, 30)
+
+    def _capture_light_off(self) -> None:
+        self._capture_light_deadline = None
+        if self.gpio.allow_outputs and self.gpio.outputs["main_light"]:
+            self.gpio.set_output("main_light", False)
+            self._changed()
+
+    def _set_buzzer(self, requested: bool) -> None:
+        if not self.settings.get("enable_actuators", False) or not self.gpio.allow_outputs:
+            return
+        now = time.monotonic()
+        maximum = float(self.settings.get("buzzer_max_seconds", 10))
+        if requested and self._buzzer_started is None:
+            self._buzzer_started = now
+        enabled = requested and self._buzzer_started is not None and now - self._buzzer_started < maximum
+        if not requested:
+            self._buzzer_started = None
+        if self.gpio.outputs["buzzer"] != enabled:
+            self.gpio.set_output("buzzer", enabled)
+            self._changed()
+
+    async def _clear_guidance(self) -> None:
+        previous = self._last_guidance
+        self._last_guidance = None
+        self._last_guidance_sent = 0.0
+        self._last_esp_connection = False
+        if previous is not None and self.esp.serial is not None:
+            try:
+                await self.esp.send({"v": 1, "type": "command", "id": str(uuid4()),
+                                     "action": "set_all_lights",
+                                     "modes": {slot: "OFF" for slot in previous}})
+            except ConnectionError:
+                pass  # The ESP guidance watchdog also turns the outputs off.
+
+    async def _apply_guidance(self, guidance: dict) -> None:
+        modes = guidance.get("modes")
+        expected_slots = {f"P-{number:02d}" for number in range(1, 9)}
+        expected_slots.update(f"M-{number:02d}" for number in range(1, 5))
+        if not isinstance(modes, dict) or set(modes) != expected_slots or any(
+                mode not in {"OFF", "STEADY_ON", "NORMAL_BLINK", "SOS_BLINK"}
+                for mode in modes.values()):
+            self._set_buzzer(False)
+            await self._clear_guidance()
+            return
+        self._set_buzzer(bool(guidance.get("buzzer")))
+        if self.esp.serial is not None and (
+                modes != self._last_guidance or not self._last_esp_connection or
+                time.monotonic() - self._last_guidance_sent >= 5):
+            try:
+                await self.esp.send({"v": 1, "type": "command", "id": str(uuid4()),
+                                     "action": "set_all_lights", "modes": modes})
+                self._last_guidance = modes.copy()
+                self._last_esp_connection = True
+                self._last_guidance_sent = time.monotonic()
+            except ConnectionError:
+                self._last_esp_connection = False
 
     async def run(self) -> None:
         if self.settings["mode"] == "real":
@@ -309,6 +452,9 @@ class HardwareService:
             LOG.exception("Hardware monitoring stopped")
         finally:
             self.ready = False
+            self._set_buzzer(False)
+            self._capture_light_off()
+            await self._clear_guidance()
             self.esp.close()
             self.gpio.close()
 

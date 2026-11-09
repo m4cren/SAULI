@@ -60,6 +60,16 @@ export interface IssuedRetrieval { id: string; raw_token: string; qr_payload: st
 export interface RetrievalSessionStatus { id: string; status: RetrievalStatus; issued_at: string; expires_at: string; item_summary: string; unit: RetrievalUnitLocation | null; validated_at: string | null; completed_at: string | null; slot_code: string | null; section: StorageSize | null; wrong_item_out: boolean; retriever: string | null; can_replace: boolean; completed: boolean }
 export interface ValidatedRetrieval { id: string; status: "validated"; item_summary: string; slot_code: string; section: StorageSize; slot_status: "occupied"; action_token: string }
 export interface SimulatedRetrieval { id: string; status: "validated" | "completed"; wrong_item_out: boolean; completed_at: string | null }
+export interface HardwareWorkflow { placement_status: "reserved" | "placed" | null; retrieval_status: RetrievalStatus | null; wrong_slots: string[]; hardware_online: boolean }
+export function getHardwareWorkflow(params: { itemId: string } | { sessionId: string }) {
+  const query = "itemId" in params ? `item_id=${encodeURIComponent(params.itemId)}` : `session_id=${encodeURIComponent(params.sessionId)}`;
+  return kioskApi<HardwareWorkflow>(`/api/hardware/workflow?${query}`);
+}
+export function setCaptureLight(enabled: boolean) {
+  return kioskApi<{ id: string; status: string }>("/api/hardware/capture-light", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
+  });
+}
 export interface RetrievalLog { id: string; retrieval_session_id: string; retriever: string; item_summary: string; slot_code: string; retrieved_at: string; completion_source: string }
 
 async function api<T>(path: string, init?: RequestInit, origin = baseUrl): Promise<T> {
