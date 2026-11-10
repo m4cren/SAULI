@@ -4,11 +4,13 @@ import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
+from fastapi.testclient import TestClient
+
 from app.auth.kiosk import get_device, get_kiosk_session
 from app.config import Settings
 from app.main import create_app
 from app.repositories.supabase_kiosks import SupabaseKioskRepository
-from fastapi.testclient import TestClient
+from app.routes.hardware import HardwareSnapshot
 
 
 def snapshot():
@@ -20,6 +22,13 @@ def snapshot():
             "pocket_light_gate", "medium_light_gate")},
         "lock_feedback": "unavailable"},
         "esp": {"connection": "offline", "telemetry": None}}
+
+
+def test_legacy_heartbeat_preserves_unknown_pending_queue():
+    assert HardwareSnapshot.model_validate(snapshot()).pending_presence_count is None
+    assert HardwareSnapshot.model_validate({
+        **snapshot(), "pending_presence_count": 0,
+    }).pending_presence_count == 0
 
 
 def test_hardware_heartbeat_rejects_anonymous_and_simulated_payload():

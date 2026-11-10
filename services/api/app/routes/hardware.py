@@ -95,7 +95,7 @@ class HardwareSnapshot(BaseModel):
     esp: EspState
     events: list[HardwareEvent] = Field(default_factory=list, max_length=64)
     door_workflow: DoorWorkflowState = Field(default_factory=DoorWorkflowState)
-    pending_presence_count: int = Field(default=0, ge=0, le=128)
+    pending_presence_count: int | None = Field(default=None, ge=0, le=128)
 
 
 class Heartbeat(BaseModel):

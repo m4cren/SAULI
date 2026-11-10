@@ -134,7 +134,7 @@ class HardwareService:
                 "esp": self.esp.snapshot() if self.settings["mode"] == "real" else
                 {"connection": "simulated", "telemetry": None},
                 "events": self.events[:64],
-                  "pending_presence_count": len(self._pending_presence),
+                "pending_presence_count": len(self._pending_presence),
                 "door_workflow": self.door_workflow.snapshot()}
 
     def record_door_changes(self) -> None:

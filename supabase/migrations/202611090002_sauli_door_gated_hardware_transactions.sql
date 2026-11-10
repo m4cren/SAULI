@@ -235,7 +235,9 @@ begin
   v_boot := p_snapshot #>> '{esp,boot_id}';
   v_seq := nullif(v_telemetry->>'seq','')::bigint;
   v_telemetry_at := nullif(p_snapshot #>> '{esp,telemetry_at}','')::timestamptz;
-  v_pending := coalesce((p_snapshot->>'pending_presence_count')::integer,0);
+  -- An older controller does not report its in-flight event queue. Its missing
+  -- count must never be interpreted as an empty queue during finalization.
+  v_pending := (p_snapshot->>'pending_presence_count')::integer;
 
   insert into public.sauli_hardware_transactions(unit_id,assigned_slot_id,
     found_item_id,retrieval_session_id)
