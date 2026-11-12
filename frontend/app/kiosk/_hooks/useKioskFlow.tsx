@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from "react";
-import { analyzeFoundItem, confirmAndStoreFoundItem, getHardwareWorkflow, getSlotAvailability, reconcileFoundItemReview, SauliApiError, setCaptureLight, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type HardwareWorkflow, type SlotAvailability } from "@/libs/api/sauli";
+import { analyzeFoundItem, confirmAndStoreFoundItem, getHardwareWorkflow, getSlotAvailability, reconcileFoundItemReview, requestFoundUnlock, requestRetrievalUnlock, SauliApiError, setCaptureLight, simulateItemPlacement, simulateRetrievalEvent, validateRetrievalQr, type FoundItemAnalysis, type HardwareWorkflow, type SlotAvailability } from "@/libs/api/sauli";
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots";
 import type { Compartment } from "../_types/kiosk";
@@ -24,6 +24,9 @@ function useKioskFlow() {
   const [busy, setBusy] = useState(false);
   const [hardwareOnline, setHardwareOnline] = useState<boolean | null>(null);
   const [hardwarePhase, setHardwarePhase] = useState<HardwareWorkflow["phase"] | null>(null);
+  const [hardwareDoor, setHardwareDoor] = useState<HardwareWorkflow["door"]>("unknown");
+  const [lastUnlock, setLastUnlock] = useState<HardwareWorkflow["last_unlock"]>(null);
+  const [unlockStatus, setUnlockStatus] = useState<"queued" | "unavailable" | null>(null);
   const [lightFault, setLightFault] = useState(false);
   const lightOwned = useRef(false);
   const files = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
@@ -81,7 +84,7 @@ function useKioskFlow() {
 
   useEffect(() => {
     const assignment = state.screen.mode === "found" && state.screen.step === "placement" ? state.assignment : null;
-    const retrieval = state.screen.mode === "retrieve" && state.screen.step === "itemLocation" ? state.validatedRetrieval : null;
+    const retrieval = state.screen.mode === "retrieve" && (state.screen.step === "qrVerified" || state.screen.step === "itemLocation") ? state.validatedRetrieval : null;
     if (!assignment && !retrieval) return;
     let active = true;
     let polling = false;
@@ -93,6 +96,9 @@ function useKioskFlow() {
         if (!active) return;
         setHardwareOnline(workflow.hardware_online);
         setHardwarePhase(workflow.phase);
+        setHardwareDoor(workflow.door);
+        setLastUnlock(workflow.last_unlock);
+        if (workflow.unlock_retry_available) setUnlockStatus("unavailable");
         if (assignment) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_PLACEMENT", slot: workflow.wrong_slots[0] });
           else if (state.modal === "wrongPlacement") dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
@@ -102,7 +108,7 @@ function useKioskFlow() {
           else if (state.modal === "wrongItem") dispatch({ type: "WRONG_ITEM_RETURNED" });
           else if (workflow.retrieval_status === "completed") dispatch({ type: "CORRECT_ITEM" });
         }
-      } catch { if (active) { setHardwareOnline(false); setHardwarePhase(null); } }
+      } catch { if (active) { setHardwareOnline(false); setHardwarePhase(null); setHardwareDoor("unknown"); setLastUnlock(null); } }
       finally { polling = false; }
     }
     void poll();
@@ -149,6 +155,9 @@ function useKioskFlow() {
     confirmationKey.current = null;
     setAnalysis(null);
     setHardwarePhase(null);
+    setHardwareDoor("unknown");
+    setLastUnlock(null);
+    setUnlockStatus(null);
     setLightFault(false);
     dispatch({ type: "RESET" });
   }
@@ -215,6 +224,7 @@ function useKioskFlow() {
       clearImage("front"); clearImage("back");
       files.current = { front: null, back: null };
       setAnalysis(null);
+      setUnlockStatus(assigned.unlock_status);
       dispatch({ type: "FOUND_CONFIRMED", assignment: assigned });
     } catch (error) {
       if (error instanceof SauliApiError && error.code === "NO_AVAILABLE_STORAGE_SLOT") dispatch({ type: "NO_SLOTS", size: error.requestedSize ?? state.storageSize });
@@ -246,6 +256,7 @@ function useKioskFlow() {
       const retrieval = await validateRetrievalQr(payload);
       clearImage("qr");
       qrFile.current = null;
+      setUnlockStatus(retrieval.unlock_status);
       dispatch({ type: "QR_VALID", retrieval });
     } catch (cause) {
       dispatch({ type: "QR_INVALID", message: cause instanceof Error ? cause.message : "The QR could not be verified.",
@@ -271,6 +282,20 @@ function useKioskFlow() {
     clearImage("qr");
     qrFile.current = null;
     dispatch({ type: "TRY_ANOTHER_QR" });
+  }
+
+  async function retryUnlock() {
+    if (busy || unlockStatus !== "unavailable" || lastUnlock?.status === "failed" || lastUnlock?.status === "rejected") return;
+    const assignment = state.screen.mode === "found" ? state.assignment : null;
+    const retrieval = state.screen.mode === "retrieve" ? state.validatedRetrieval : null;
+    if (!assignment && !retrieval) return;
+    setBusy(true);
+    try {
+      const result = assignment ? await requestFoundUnlock(assignment.item_id) : await requestRetrievalUnlock(retrieval!.id);
+      if (["pending", "claimed", "acked"].includes(result.status)) setUnlockStatus("queued");
+    } catch (cause) {
+      dispatch({ type: "SET_ERROR", message: cause instanceof Error ? cause.message : "The door could not be requested. Please ask staff for help." });
+    } finally { setBusy(false); }
   }
 
   async function simulateRetrieval(event: "completion" | "wrong-item" | "item-returned") {
@@ -309,9 +334,9 @@ function useKioskFlow() {
   }
 
   return {
-    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, busy, analysis,
+    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, hardwareDoor, lastUnlock, unlockStatus, busy, analysis,
     setCaptureLightFault: setLightFault,
-    selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr,
+    selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr, retryUnlock,
     startFound: () => dispatch({ type: "START_FOUND" }),
     startRetrieve: () => dispatch({ type: "START_RETRIEVE" }),
     acceptSide: (side: "front" | "back") => dispatch({ type: "SIDE_ACCEPTED", side }),

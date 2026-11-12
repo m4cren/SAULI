@@ -72,7 +72,9 @@ delete from public.sauli_hardware_snapshots where unit_id in
 delete from public.sauli_hardware_transactions where unit_id in
   (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
    or unit_code = current_setting('app.sauli_reset_unit_code'));
-delete from public.sauli_hardware_incidents where slot_id in (select id from sauli_reset_slots);
+delete from public.sauli_hardware_incidents where unit_id in
+  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
+   or unit_code = current_setting('app.sauli_reset_unit_code'));
 delete from public.sauli_hardware_presence_events where slot_id in (select id from sauli_reset_slots);
 delete from public.sauli_hardware_presence where slot_id in (select id from sauli_reset_slots);
 

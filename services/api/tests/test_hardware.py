@@ -1,6 +1,7 @@
 """Hardware telemetry is device scoped; public diagnostics are read only."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -190,3 +191,48 @@ def test_hardware_workflow_surfaces_other_active_incidents_in_same_unit():
 
     assert workflow["wrong_slots"] == ["P-06"]
     assert ("sauli_hardware_incidents", {"unit_id": unit_id, "active": True}) in queries
+
+
+def test_expired_unclaimed_unlock_can_be_retried():
+    unit_id, item_id, command_id = (str(uuid4()) for _ in range(3))
+    expiration = datetime.now(UTC) - timedelta(seconds=1)
+
+    class Query:
+        def __init__(self, table):
+            self.name = table
+
+        def select(self, _columns):
+            return self
+
+        def eq(self, _column, _value):
+            return self
+
+        def limit(self, _count):
+            return self
+
+        def order(self, _column, desc=False):
+            return self
+
+        def execute(self):
+            rows = {
+                "found_items": [{"id": item_id, "unit_id": unit_id,
+                                 "placement_status": "reserved"}],
+                "sauli_hardware_incidents": [],
+                "sauli_hardware_snapshots": [],
+                "sauli_hardware_transactions": [{"phase": "awaiting_door_open",
+                    "last_door": "closed", "found_item_id": item_id,
+                    "retrieval_session_id": None, "command_id": command_id}],
+                "sauli_hardware_commands": [{"status": "pending",
+                    "expires_at": expiration.isoformat()}],
+            }
+            return SimpleNamespace(data=rows[self.name])
+
+    class Client:
+        def table(self, name):
+            return Query(name)
+
+    repository = SupabaseKioskRepository(None)
+    repository.client = lambda: Client()
+    workflow = asyncio.run(repository.hardware_workflow(
+        {"unit_id": unit_id}, item_id=item_id, session_id=None))
+    assert workflow["unlock_retry_available"] is True

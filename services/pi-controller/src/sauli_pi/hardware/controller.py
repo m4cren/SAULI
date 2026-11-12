@@ -111,22 +111,33 @@ class GPIOController:
             device.on() if enabled else device.off()
         self.outputs[name] = enabled
 
-    async def pulse(self, door: str) -> None:
+    async def pulse(self, door: str, *, on_activated=None, on_deactivated=None) -> None:
         if door not in self.INPUTS:
             raise ValueError("Unknown door")
         if not self.simulation and not self.allow_outputs:
             raise ValueError("Output polarity has not been verified")
         name = f"{door}_solenoid"
         async with self._pulse_lock:
+            activated = False
             try:
                 if not self.simulation:
                     self._outputs[name].on()
                 self.outputs[name] = True
+                activated = True
+                if on_activated is not None:
+                    on_activated()
                 await asyncio.sleep(self.pulse_seconds)
             finally:
-                if not self.simulation:
-                    self._outputs[name].off()
-                self.outputs[name] = False
+                try:
+                    if activated and not self.simulation:
+                        self._outputs[name].off()
+                    self.outputs[name] = False
+                    if activated and on_deactivated is not None:
+                        on_deactivated()
+                except Exception:
+                    # A failed GPIO off call must not be reported as deactivated.
+                    self.outputs[name] = True
+                    raise
 
     def snapshot(self) -> dict:
         return {"mode": "simulation" if self.simulation else "real",

@@ -42,7 +42,7 @@ export interface FoundItemAnalysis {
 }
 
 export interface AnalysisResponse { analysis: FoundItemAnalysis; found_location: string; notes: string | null; summary: string; model: string }
-export interface ConfirmedItem { item_id: string; status: "available"; summary: string; found_location: string; found_at: string; storage_size: StorageSize; slot_code: string; section: string; slot_status: "reserved" | "occupied"; placement_status: "reserved" | "placed" }
+export interface ConfirmedItem { item_id: string; status: "available"; summary: string; found_location: string; found_at: string; storage_size: StorageSize; slot_code: string; section: string; slot_status: "reserved" | "occupied"; placement_status: "reserved" | "placed"; unlock_status: "queued" | "unavailable" }
 export interface StorageSlot { id: string; unit_id: string; code: string; size_class: StorageSize; ordinal: number; status: SlotStatus; is_active: boolean; current_found_item_id: string | null; item_summary: string | null; reserved_at: string | null; occupied_at: string | null; updated_at: string }
 export interface KioskDevice { id: string; unit_id: string; device_code: string; hostname: string | null; hardware_type: string | null; status: "pending" | "active" | "revoked"; last_seen_at: string | null }
 export interface SauliUnit { id: string; unit_code: string; display_name: string; campus_code: string; campus_name: string; building_name: string; floor: string | null; location_description: string | null; status: "provisioning" | "active" | "maintenance" | "inactive" | "retired"; capacity: { total: number; available: number; reserved: number; occupied: number; out_of_service: number }; devices: KioskDevice[] }
@@ -58,9 +58,9 @@ export type RetrievalStatus = "issued" | "validated" | "completed" | "expired" |
 export interface RetrievalUnitLocation { unit_code: string; display_name: string; campus_name: string; building_name: string; floor: string | null; location_description: string | null }
 export interface IssuedRetrieval { id: string; raw_token: string; qr_payload: string; issued_at: string; expires_at: string; status: RetrievalStatus; item_summary: string; unit: RetrievalUnitLocation | null }
 export interface RetrievalSessionStatus { id: string; status: RetrievalStatus; issued_at: string; expires_at: string; item_summary: string; unit: RetrievalUnitLocation | null; validated_at: string | null; completed_at: string | null; slot_code: string | null; section: StorageSize | null; wrong_item_out: boolean; retriever: string | null; can_replace: boolean; completed: boolean }
-export interface ValidatedRetrieval { id: string; status: "validated"; item_summary: string; slot_code: string; section: StorageSize; slot_status: "occupied"; action_token: string }
+export interface ValidatedRetrieval { id: string; status: "validated"; item_summary: string; slot_code: string; section: StorageSize; slot_status: "occupied"; action_token: string; unlock_status: "queued" | "unavailable" }
 export interface SimulatedRetrieval { id: string; status: "validated" | "completed"; wrong_item_out: boolean; completed_at: string | null }
-export interface HardwareWorkflow { placement_status: "reserved" | "placed" | null; retrieval_status: RetrievalStatus | null; wrong_slots: string[]; hardware_online: boolean; phase: "awaiting_door_open" | "door_open" | "provisional_success" | "warning_active" | "awaiting_door_close" | "requires_review" | "completed"; door: "open" | "closed" | "unknown" }
+export interface HardwareWorkflow { placement_status: "reserved" | "placed" | null; retrieval_status: RetrievalStatus | null; wrong_slots: string[]; hardware_online: boolean; phase: "awaiting_door_open" | "door_open" | "provisional_success" | "warning_active" | "awaiting_door_close" | "requires_review" | "completed"; door: "open" | "closed" | "unknown"; last_unlock: { status: "received" | "accepted" | "completed" | "rejected" | "failed"; activated_at: string | null; deactivated_at: string | null } | null; unlock_retry_available: boolean }
 export function getHardwareWorkflow(params: { itemId: string } | { sessionId: string }) {
   const query = "itemId" in params ? `item_id=${encodeURIComponent(params.itemId)}` : `session_id=${encodeURIComponent(params.sessionId)}`;
   return kioskApi<HardwareWorkflow>(`/api/hardware/workflow?${query}`);
@@ -118,6 +118,9 @@ export function confirmAndStoreFoundItem(front: File, back: File, location: stri
   form.append("analysis_json", JSON.stringify(analysis));
   form.append("storage_size", size);
   return kioskApi<ConfirmedItem>("/api/found-items/confirm-and-store", { method: "POST", headers: { "X-Idempotency-Key": key }, body: form });
+}
+export function requestFoundUnlock(itemId: string) {
+  return kioskApi<{ status: string }>(`/api/found-items/${encodeURIComponent(itemId)}/request-unlock`, { method: "POST" });
 }
 export function simulateItemPlacement(itemId: string, slotCode: string) {
   return kioskApi<ConfirmedItem>(`/api/found-items/${encodeURIComponent(itemId)}/simulate-placement`, {
@@ -192,6 +195,9 @@ export async function replaceRetrievalSession(id: string) {
 export function validateRetrievalQr(qrPayload: string) {
   return kioskApi<ValidatedRetrieval>("/api/retrieval-sessions/validate", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ qr_payload: qrPayload }) });
+}
+export function requestRetrievalUnlock(sessionId: string) {
+  return kioskApi<{ status: string }>(`/api/retrieval-sessions/${encodeURIComponent(sessionId)}/request-unlock`, { method: "POST" });
 }
 export function simulateRetrievalEvent(id: string, actionToken: string, event: "completion" | "wrong-item" | "item-returned") {
   return kioskApi<SimulatedRetrieval>(`/api/retrieval-sessions/${encodeURIComponent(id)}/simulate-${event}`, {

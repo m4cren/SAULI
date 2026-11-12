@@ -369,6 +369,16 @@ def test_pc_retrieval_api_path_releases_slot_and_rejects_rescan():
         Settings(retrieval_token_pepper="a" * 48, sauli_admin_user_id=str(admin_id))
     )
     app.state.items = repo
+    class Kiosks:
+        calls = 0
+
+        async def enqueue_workflow_unlock(self, _kiosk, *, session_id):
+            assert session_id
+            self.calls += 1
+            return {"status": "pending"}
+
+    kiosks = Kiosks()
+    app.state.kiosks = kiosks
     app.dependency_overrides[get_current_user] = lambda: UserResponse(
         id=str(claimant_id), name="Test claimant"
     )
@@ -383,6 +393,8 @@ def test_pc_retrieval_api_path_releases_slot_and_rejects_rescan():
         )
         assert accepted.status_code == 200
         assert accepted.json()["slot_code"] == "M-04"
+        assert accepted.json()["unlock_status"] == "queued"
+        assert kiosks.calls == 1
         assert (
             client.post(
                 "/api/retrieval-sessions/validate",
@@ -437,6 +449,29 @@ def test_pc_retrieval_api_path_releases_slot_and_rejects_rescan():
         logs = client.get("/api/retrieval-sessions/admin/logs")
         assert logs.status_code == 200 and logs.json()[0]["slot_code"] == "M-04"
         assert logs.json()[0]["completion_source"] == "web_simulation"
+
+
+def test_validated_qr_survives_unlock_transport_failure():
+    repo = RetrievalRepo()
+    app = create_app(Settings(retrieval_token_pepper="a" * 48))
+    app.state.items = repo
+    app.dependency_overrides[get_current_user] = lambda: UserResponse(id=str(uuid4()), name="Claimant")
+
+    class Kiosks:
+        async def enqueue_workflow_unlock(self, _kiosk, *, session_id):
+            assert session_id
+            raise OSError("transport unavailable")
+
+    app.state.kiosks = Kiosks()
+    with TestClient(app) as client:
+        issued = client.post("/api/retrieval-sessions", json={"match_candidate_id": str(uuid4())}).json()
+        accepted = client.post("/api/retrieval-sessions/validate", json={"qr_payload": issued["qr_payload"]})
+        replay = client.post("/api/retrieval-sessions/validate", json={"qr_payload": issued["qr_payload"]})
+
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "validated"
+    assert accepted.json()["unlock_status"] == "unavailable"
+    assert replay.json()["error"]["code"] == "RETRIEVAL_QR_ALREADY_USED"
 
 
 def test_live_status_works_before_the_additive_rpc_migration_is_applied():

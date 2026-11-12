@@ -86,6 +86,18 @@ class DoorWorkflowState(BaseModel):
     fault: Literal["door_open_timeout", "door_close_timeout", "hardware_failure"] | None = None
 
 
+class LastUnlockState(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    command_id: UUID
+    target_group: Literal["pocket", "medium"]
+    status: Literal["received", "accepted", "completed", "rejected", "failed"]
+    accepted_at: datetime | None = None
+    activated_at: datetime | None = None
+    deactivated_at: datetime | None = None
+    pulse_seconds: float = Field(ge=0, le=10)
+    last_output_error: Literal["hardware_failure"] | None = None
+
+
 class HardwareSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
     sequence: int | None = Field(default=None, ge=0)
@@ -95,6 +107,7 @@ class HardwareSnapshot(BaseModel):
     esp: EspState
     events: list[HardwareEvent] = Field(default_factory=list, max_length=64)
     door_workflow: DoorWorkflowState = Field(default_factory=DoorWorkflowState)
+    last_unlock: LastUnlockState | None = None
     pending_presence_count: int | None = Field(default=None, ge=0, le=128)
 
 

@@ -6,6 +6,7 @@ import { useKiosk } from "../_hooks/useKioskFlow";
 import CompartmentMap from "./CompartmentMap";
 import FlowHeading from "./FlowHeading";
 import SensorStatusCard from "./SensorStatusCard";
+import DoorUnlockNotice from "./DoorUnlockNotice";
 
 export default function ItemLocationScreen() {
   const kiosk = useKiosk();
@@ -15,11 +16,13 @@ export default function ItemLocationScreen() {
   const section = retrieval.section === "pocket" ? "Pocket-size" : "Medium-size";
   const provisional = kiosk.hardwarePhase === "provisional_success" || kiosk.hardwarePhase === "awaiting_door_close";
   const review = kiosk.hardwarePhase === "requires_review" || kiosk.hardwarePhase === "warning_active";
-  return <><FlowHeading flow="retrieve" current={3} title="Retrieve your item" subtitle={`The ${section.toLowerCase()} door is unlocked. Lift your item from ${retrieval.slot_code}.`} />
+  const doorOpen = kiosk.hardwareOnline === true && kiosk.hardwareDoor === "open";
+  return <><FlowHeading flow="retrieve" current={3} title="Retrieve your item" subtitle={doorOpen ? `The ${section.toLowerCase()} door is unlocked. Lift your item from ${retrieval.slot_code}.` : `Your item is in ${retrieval.slot_code}. Wait for the door to open before lifting it.`} />
     <div className="kiosk-grid"><CompartmentMap slots={kiosk.slots} assignedCode={retrieval.slot_code} section={section} />
       <section className="kiosk-card flex flex-col p-4 sm:p-5"><span className="kiosk-pill w-fit">POSITION {retrieval.slot_code}</span>
         <div aria-hidden="true" className="mx-auto mt-2 flex h-18 items-center justify-center text-6xl text-[#149e93]">↑<span className="ml-1 text-5xl">▱</span></div>
-        <h2 className="text-[clamp(20px,2.1vw,28px)] font-bold">{review ? "Retrieval needs attention" : provisional ? "Item lifted. Close the door" : "Lift only your item"}</h2><p className="text-sm text-[#53646c]">{review ? "Return any other item to its original position. SAULI will verify the cabinet before completing retrieval." : provisional ? "Close the door carefully. SAULI will verify every position before completing retrieval." : <>Remove <strong>{retrieval.item_summary}</strong> from {retrieval.slot_code}. SAULI will confirm the retrieval automatically.</>}</p>
+        <h2 className="text-[clamp(20px,2.1vw,28px)] font-bold">{review ? "Retrieval needs attention" : provisional ? "Item lifted. Close the door" : doorOpen ? "Lift only your item" : "Waiting for door unlock"}</h2><p className="text-sm text-[#53646c]">{review ? "Return any other item to its original position. SAULI will verify the cabinet before completing retrieval." : provisional ? "Close the door carefully. SAULI will verify every position before completing retrieval." : doorOpen ? <>Remove <strong>{retrieval.item_summary}</strong> from {retrieval.slot_code}. SAULI will confirm the retrieval automatically.</> : "Wait for the door sensor to confirm the door is open."}</p>
+        {!provisional && !review && <DoorUnlockNotice />}
         <ol className="mt-3 grid gap-1 text-sm"><li><strong>1.</strong> Open the {section.toLowerCase()} door.</li><li><strong>2.</strong> Lift only your item from {retrieval.slot_code}.</li><li><strong>3.</strong> Close the door carefully.</li></ol>
         <div className="mt-auto"><SensorStatusCard title="Removal sensor active" detail={provisional ? "Waiting for the door to close and sensors to agree" : "Waiting for the item to be lifted"} />
           {kiosk.hardwareOnline === false && <p role="status" className="mt-2 text-sm text-amber-800">The hardware connection is unavailable. Keep the item in place while SAULI reconnects.</p>}

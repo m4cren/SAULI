@@ -220,6 +220,20 @@ class SupabaseKioskRepository:
     async def hardware_guidance(self, device: dict) -> dict:
         return await self.rpc("sauli_hardware_guidance", {"p_unit_id": device["unit_id"]})
 
+    async def enqueue_workflow_unlock(self, device: dict, *,
+                                      item_id: str | None = None,
+                                      session_id: str | None = None) -> dict:
+        result = await self.rpc("sauli_queue_workflow_unlock", {
+            "p_device_id": device["id"], "p_item_id": item_id,
+            "p_session_id": session_id,
+        })
+        if not isinstance(result, dict) or result.get("error"):
+            code = result.get("error", "HARDWARE_UNAVAILABLE") if isinstance(result, dict) else "HARDWARE_UNAVAILABLE"
+            raise ServiceError(code, "The door could not be requested. Check the hardware and try again.", 503)
+        if result.get("status") == "failed":
+            raise ServiceError("UNLOCK_FAILED", "The unlock signal failed. Ask an operator to check the door.", 503)
+        return result
+
     async def hardware_workflow(self, device: dict, *, item_id: str | None,
                                 session_id: str | None) -> dict:
         def fetch():
@@ -251,22 +265,43 @@ class SupabaseKioskRepository:
                 .eq("unit_id", device["unit_id"]).order("received_at", desc=True)
                 .limit(1).execute().data or [])
             transaction_rows = (client.table("sauli_hardware_transactions")
-                .select("phase,last_door,found_item_id,retrieval_session_id")
+                .select("phase,last_door,found_item_id,retrieval_session_id,command_id")
                 .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
             transaction = next((row for row in transaction_rows
                 if (item_id and row["found_item_id"] == item_id) or
                    (session_id and row["retrieval_session_id"] == session_id)), None)
+            unlock_retry_available = False
+            if transaction and transaction["phase"] == "awaiting_door_open" and transaction.get("command_id"):
+                commands = (client.table("sauli_hardware_commands")
+                    .select("status,expires_at").eq("id", transaction["command_id"])
+                    .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
+                if commands and commands[0]["status"] == "pending":
+                    expires_at = datetime.fromisoformat(commands[0]["expires_at"].replace("Z", "+00:00"))
+                    unlock_retry_available = expires_at <= datetime.now(UTC)
             online = False
+            last_unlock = None
+            observed_door = "unknown"
             if snapshots:
                 age = (datetime.now(UTC) - datetime.fromisoformat(
                     snapshots[0]["received_at"].replace("Z", "+00:00"))).total_seconds()
-                online = age <= 5 and ((snapshots[0]["snapshot"].get("esp") or {}).get("connection") == "online")
+                snapshot = snapshots[0]["snapshot"] or {}
+                online = age <= 5 and ((snapshot.get("esp") or {}).get("connection") == "online")
+                if transaction:
+                    reported = snapshot.get("last_unlock") or {}
+                    if reported.get("command_id") == transaction.get("command_id"):
+                        last_unlock = {"status": reported.get("status"),
+                                       "activated_at": reported.get("activated_at"),
+                                       "deactivated_at": reported.get("deactivated_at")}
+                    if age <= 5 and transaction.get("last_door") in ("open", "closed"):
+                        observed_door = transaction["last_door"]
             return {"placement_status": item["placement_status"] if item else None,
                     "retrieval_status": session["status"] if session else None,
                     "wrong_slots": [codes.get(row["slot_id"], "unknown") for row in incidents],
                     "hardware_online": online,
                     "phase": transaction["phase"] if transaction else "awaiting_door_open",
-                    "door": transaction["last_door"] if transaction else "unknown"}
+                    "door": observed_door,
+                    "last_unlock": last_unlock,
+                    "unlock_retry_available": unlock_retry_available}
         return await run_in_threadpool(fetch)
 
     async def claim_hardware_commands(self, device: dict) -> list[dict]:
@@ -336,6 +371,7 @@ class SupabaseKioskRepository:
                 "doors": pi.get("doors", {}), "outputs": pi.get("outputs", {}),
                 "lock_feedback": "unavailable",
                 "door_workflow": snapshot.get("door_workflow", {}),
+                "last_unlock": snapshot.get("last_unlock"),
                 "esp": {"connection": esp.get("connection", "offline"),
                         "frame_errors": esp.get("frame_errors", 0),
                         "error": esp.get("error"), "slots": telemetry.get("slots", [])},

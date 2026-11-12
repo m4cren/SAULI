@@ -42,6 +42,10 @@ class DoorWorkflow:
         self.phase = "pulsing"
 
     def pulse_finished(self, now: float | None = None) -> None:
+        # A reed may open while the short output pulse is still active. Keep
+        # that observed transition instead of resetting the workflow.
+        if self.phase == "awaiting_close":
+            return
         self.phase = "awaiting_open"
         self.deadline = (time.monotonic() if now is None else now) + self.open_timeout_seconds
 
@@ -52,12 +56,14 @@ class DoorWorkflow:
 
     def observe(self, observed: str, now: float | None = None) -> str | None:
         now = time.monotonic() if now is None else now
-        if self.phase == "awaiting_open":
+        if self.phase in {"pulsing", "awaiting_open"}:
             if observed == "open":
                 self.phase = "awaiting_close"
                 self.deadline = now + self.close_timeout_seconds
                 return "workflow_door_opened"
-            if now >= self.deadline:
+            # The open timeout starts after the pulse ends. During the pulse
+            # deadline is still zero, so a closed reed is expected.
+            if self.phase == "awaiting_open" and now >= self.deadline:
                 self.fail("door_open_timeout")
                 return "workflow_open_timeout"
         elif self.phase == "awaiting_close":

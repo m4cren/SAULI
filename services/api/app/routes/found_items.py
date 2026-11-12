@@ -1,5 +1,7 @@
 """Two-image analysis, correction, explicit save and safe item details."""
 
+import logging
+
 from uuid import UUID
 
 from typing import Annotated
@@ -16,6 +18,7 @@ from app.services.found_items import confirm_item, public_details
 from app.services.images import read_upload
 
 router = APIRouter(prefix="/api/found-items", tags=["found-items"])
+log = logging.getLogger(__name__)
 Kiosk = Annotated[dict, Depends(get_kiosk_session)]
 
 
@@ -77,7 +80,15 @@ async def confirm_and_store(request: Request, kiosk: Kiosk, front_image: UploadF
         slot = await request.app.state.items.get_slot_for_item(UUID(str(existing["id"])))
         if not slot:
             raise ServiceError("STORAGE_STATE_CONFLICT", "The assigned position is unavailable. Please try again.", 409)
-        return confirmed(existing, slot)
+        result = confirmed(existing, slot)
+        if result.placement_status == "reserved":
+            try:
+                await request.app.state.kiosks.enqueue_workflow_unlock(
+                    kiosk, item_id=str(result.item_id))
+            except Exception:
+                log.warning("Stored item unlock unavailable", extra={"item_id": str(result.item_id)})
+                return result.model_copy(update={"unlock_status": "unavailable"})
+        return result
     await exact_image_pair(request)
     settings = request.app.state.settings
     front = await read_upload(front_image, "front", settings)
@@ -86,7 +97,22 @@ async def confirm_and_store(request: Request, kiosk: Kiosk, front_image: UploadF
         analysis = safe_analysis(strict_analysis_json(analysis_json))
     except (ValueError, TypeError) as exc:
         raise ServiceError("INVALID_ANALYSIS", "The item analysis is incomplete or invalid. Please analyze it again.", 422) from exc
-    return await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis, storage_size, UUID(kiosk["unit_id"]))
+    result = await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis, storage_size, UUID(kiosk["unit_id"]))
+    if result.placement_status == "reserved":
+        try:
+            await request.app.state.kiosks.enqueue_workflow_unlock(
+                kiosk, item_id=str(result.item_id))
+        except Exception:
+            log.warning("Stored item unlock unavailable", extra={"item_id": str(result.item_id)})
+            return result.model_copy(update={"unlock_status": "unavailable"})
+    return result
+
+
+@router.post("/{item_id}/request-unlock")
+async def retry_placement_unlock(request: Request, item_id: UUID, kiosk: Kiosk):
+    result = await request.app.state.kiosks.enqueue_workflow_unlock(
+        kiosk, item_id=str(item_id))
+    return {"status": result["status"]}
 
 
 @router.post("/{item_id}/simulate-placement", response_model=ConfirmedItemResponse)

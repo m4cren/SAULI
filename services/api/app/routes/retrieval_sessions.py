@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Header, Request
 
 from app.auth.dependencies import get_admin_user, get_current_user
 from app.auth.kiosk import get_kiosk_session
+from app.core.errors import ServiceError
 from app.schemas.auth import UserResponse
 from app.schemas.retrieval_sessions import (
     CreateRetrievalRequest,
@@ -55,9 +56,26 @@ async def create_session(
 @router.post("/validate", response_model=ValidatedRetrievalResponse)
 async def validate_qr(request: Request, payload: ValidateQrRequest,
                       kiosk: Annotated[dict, Depends(get_kiosk_session)]):
-    return await validate(
+    result = await validate(
         request.app.state.items, request.app.state.settings, payload.qr_payload, UUID(kiosk["unit_id"])
     )
+    try:
+        await request.app.state.kiosks.enqueue_workflow_unlock(
+            kiosk, session_id=str(result["id"]))
+        return {**result, "unlock_status": "queued"}
+    except Exception:
+        log.warning("Validated retrieval unlock unavailable", extra={"session_id": str(result["id"])})
+        return {**result, "unlock_status": "unavailable"}
+
+
+@router.post("/{session_id}/request-unlock")
+async def retry_retrieval_unlock(
+    request: Request, session_id: UUID,
+    kiosk: Annotated[dict, Depends(get_kiosk_session)],
+):
+    result = await request.app.state.kiosks.enqueue_workflow_unlock(
+        kiosk, session_id=str(session_id))
+    return {"status": result["status"]}
 
 
 @router.get("/admin/logs", response_model=list[RetrievalLogResponse])

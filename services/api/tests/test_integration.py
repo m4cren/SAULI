@@ -344,6 +344,16 @@ def test_confirm_and_store_route_accepts_reviewed_analysis():
     app = create_app(Settings())
     repo = FakeRepo()
     app.state.items = repo
+    class Kiosks:
+        calls = 0
+
+        async def enqueue_workflow_unlock(self, _kiosk, *, item_id):
+            assert item_id
+            self.calls += 1
+            return {"status": "pending"}
+
+    kiosks = Kiosks()
+    app.state.kiosks = kiosks
     key = str(uuid4())
 
     def submit(client):
@@ -358,7 +368,32 @@ def test_confirm_and_store_route_accepts_reviewed_analysis():
 
     assert first.status_code == repeated.status_code == 200
     assert first.json()["item_id"] == repeated.json()["item_id"]
+    assert first.json()["unlock_status"] == repeated.json()["unlock_status"] == "queued"
+    assert kiosks.calls == 2
     assert len(repo.uploaded) == 2
+
+
+def test_confirmed_item_survives_unlock_transport_failure():
+    app = create_app(Settings())
+    repo = FakeRepo()
+    app.state.items = repo
+
+    class Kiosks:
+        async def enqueue_workflow_unlock(self, _kiosk, *, item_id):
+            assert item_id
+            raise OSError("transport unavailable")
+
+    app.state.kiosks = Kiosks()
+    with TestClient(app) as client:
+        response = client.post("/api/found-items/confirm-and-store", headers={"X-Idempotency-Key": str(uuid4())},
+            data={"found_location": "Canteen", "analysis_json": analysis().model_dump_json(), "storage_size": "pocket"},
+            files={"front_image": ("front.png", png(), "image/png"),
+                   "back_image": ("back.png", png(), "image/png")})
+
+    assert response.status_code == 200
+    assert response.json()["unlock_status"] == "unavailable"
+    assert response.json()["placement_status"] == "reserved"
+    assert len(repo.items) == 1
 
 
 def test_correction_rejects_unchanged_result_and_redacts_documents():

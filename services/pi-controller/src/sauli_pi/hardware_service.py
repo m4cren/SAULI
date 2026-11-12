@@ -100,6 +100,7 @@ class HardwareService:
         self._publish_signal = asyncio.Event()
         self._pending_acks: deque[dict] = deque()
         self._pending_presence: dict[str, dict] = {}
+        self._last_unlock: dict | None = None
         self._last_guidance: dict | None = None
         self._last_guidance_sent = 0.0
         self._last_esp_connection = False
@@ -135,6 +136,7 @@ class HardwareService:
                 {"connection": "simulated", "telemetry": None},
                 "events": self.events[:64],
                 "pending_presence_count": len(self._pending_presence),
+                "last_unlock": self._last_unlock,
                 "door_workflow": self.door_workflow.snapshot()}
 
     def record_door_changes(self) -> None:
@@ -185,20 +187,37 @@ class HardwareService:
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
+            self._last_unlock = {
+                "command_id": command_id, "target_group": door,
+                "status": "received", "accepted_at": None,
+                "activated_at": None, "deactivated_at": None,
+                "pulse_seconds": self.gpio.pulse_seconds, "last_output_error": None,
+            }
             test_channel = self.settings.get("solenoid_led_test_channel")
             if test_channel is not None and door != test_channel:
                 raise ValueError("test_channel_not_allowed")
             self.door_workflow.start(
                 command_id, door, self.gpio.doors[door].snapshot()["door"])
+            self._last_unlock["status"] = "accepted"
+            self._last_unlock["accepted_at"] = datetime.now(UTC).isoformat()
             self.event("command_accepted", command_id)
             self.door_workflow.pulsing()
-            self.event("output_activated", command_id)
-            await self.gpio.pulse(door)
+            def activated() -> None:
+                self._last_unlock["activated_at"] = datetime.now(UTC).isoformat()
+                self.event("output_activated", command_id)
+
+            def deactivated() -> None:
+                self._last_unlock["deactivated_at"] = datetime.now(UTC).isoformat()
+                self.event("output_deactivated", command_id)
+
+            await self.gpio.pulse(door, on_activated=activated, on_deactivated=deactivated)
             self.door_workflow.pulse_finished()
-            self.event("output_deactivated", command_id)
+            self._last_unlock["status"] = "completed"
             self.event("command_completed", command_id)
             return {"id": command_id, "status": "acked", "code": "pulse_completed"}
         except (KeyError, ValueError, TypeError) as exc:
+            if self._last_unlock is not None and self._last_unlock["command_id"] == command_id:
+                self._last_unlock["status"] = "rejected"
             self.event("command_rejected", command_id)
             code = str(exc)
             if code not in {"expired", "device_mismatch", "simulation_mode",
@@ -209,6 +228,9 @@ class HardwareService:
             return {"id": command_id, "status": "failed", "code": code}
         except Exception:
             LOG.exception("Hardware command failed (id=%s)", command_id)
+            if self._last_unlock is not None and self._last_unlock["command_id"] == command_id:
+                self._last_unlock["status"] = "failed"
+                self._last_unlock["last_output_error"] = "hardware_failure"
             if self.door_workflow.command_id == command_id:
                 self.door_workflow.fail("hardware_failure")
             self.event("command_failed", command_id)

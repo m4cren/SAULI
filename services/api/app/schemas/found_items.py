@@ -112,6 +112,7 @@ class ConfirmedItemResponse(StrictModel):
     section: str
     slot_status: Literal["reserved", "occupied"]
     placement_status: Literal["reserved", "placed"]
+    unlock_status: Literal["queued", "unavailable"] = "queued"
 
 
 class SimulatePlacementRequest(StrictModel):

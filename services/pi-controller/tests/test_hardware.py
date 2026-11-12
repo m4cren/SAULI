@@ -234,6 +234,29 @@ def test_door_workflow_requires_closed_door_and_observes_both_transitions():
                                    "phase": "completed", "fault": None}
 
 
+def test_door_open_during_unlock_pulse_is_preserved():
+    workflow = DoorWorkflow(open_timeout_seconds=2, close_timeout_seconds=5)
+    command_id = str(uuid4())
+    workflow.start(command_id, "pocket", "closed")
+    workflow.pulsing()
+    assert workflow.observe("open", now=10) == "workflow_door_opened"
+    workflow.pulse_finished(now=10.2)
+    assert workflow.snapshot()["phase"] == "awaiting_close"
+    assert workflow.observe("closed", now=11) == "workflow_door_closed"
+    assert workflow.snapshot()["command_id"] == command_id
+
+
+def test_closed_reed_during_unlock_pulse_does_not_timeout():
+    workflow = DoorWorkflow(open_timeout_seconds=2, close_timeout_seconds=5)
+    workflow.start(str(uuid4()), "pocket", "closed")
+    workflow.pulsing()
+    assert workflow.observe("closed", now=10) is None
+    assert workflow.snapshot()["phase"] == "pulsing"
+    workflow.pulse_finished(now=10.2)
+    assert workflow.observe("closed", now=10.5) is None
+    assert workflow.snapshot()["phase"] == "awaiting_open"
+
+
 def test_door_workflow_reports_open_and_close_timeouts():
     workflow = DoorWorkflow(open_timeout_seconds=2, close_timeout_seconds=5)
     workflow.start(str(uuid4()), "medium", "closed")

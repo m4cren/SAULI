@@ -67,6 +67,7 @@ class ValidatedRetrievalResponse(RetrievalModel):
     section: Literal["pocket", "medium"]
     slot_status: Literal["occupied"]
     action_token: str
+    unlock_status: Literal["queued", "unavailable"] = "queued"
 
 
 class SimulatedRetrievalResponse(RetrievalModel):
