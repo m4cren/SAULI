@@ -8,11 +8,16 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+
 from sauli_pi.communication.esp32_serial import EspLink
 from sauli_pi.communication.protocol import FrameDecoder, FrameError, encode_frame
 from sauli_pi.config import Config
 from sauli_pi.hardware.controller import DoorInput, GPIOController
-from sauli_pi.hardware_service import HardwareService, load_hardware, valid_presence_event
+from sauli_pi.hardware_service import (
+    HardwareService,
+    load_hardware,
+    valid_presence_event,
+)
 from sauli_pi.workflows.door import DoorWorkflow
 
 
@@ -80,6 +85,71 @@ def test_esp_reboot_invalidates_prior_sensor_snapshot():
         assert link.snapshot()["boot_id"] == "boot-b"
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("queued_event", [False, True])
+def test_reboot_snapshot_reaches_backend_after_queued_presence(monkeypatch, tmp_path: Path,
+                                                               queued_event: bool):
+    device = str(uuid4())
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "real", "device_id": device,
+                "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "enable_actuators": False, "telemetry_interval_seconds": 0.25,
+                "telemetry_min_gap_seconds": 0.1}
+    service = HardwareService(config, settings)
+    service.esp.serial = object()
+    service.esp.boot_id = "reboot_2"
+    service.esp.last_seen = time.monotonic()
+    service.esp.last_telemetry_at = service.esp.last_seen
+    service.esp.telemetry_at = datetime.now(UTC).isoformat()
+    slots = [{"code": code, "ready": True, "calibrated": True,
+              "present": code != "P-01", "fault": None}
+             for code in sorted({f"P-{number:02d}" for number in range(1, 9)} |
+                                {f"M-{number:02d}" for number in range(1, 5)})]
+    service.esp.last_telemetry = {"v": 1, "type": "telemetry", "seq": 1,
+                                  "uptime_ms": 500, "slots": slots}
+    if queued_event:
+        service._pending_presence["reboot_2-1"] = {
+            "event_id": "reboot_2-1", "boot_id": "reboot_2", "seq": 1,
+            "slot": "P-01", "kind": "SENSOR_SNAPSHOT", "present": False}
+    calls = []
+    guidance_applied = asyncio.Event()
+    modes = {row["code"]: "OFF" for row in slots}
+    modes["P-01"] = "SOS_BLINK"
+
+    def fake_request(_origin, path, payload, _credential):
+        calls.append((path, payload))
+        if path == "/api/hardware/heartbeat":
+            return {"commands": [], "guidance": {"modes": modes, "buzzer": True}}
+        return {"ok": True}
+
+    async def fake_send(message):
+        if message.get("action") == "set_all_lights":
+            guidance_applied.set()
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", fake_request)
+    service.esp.send = fake_send
+
+    async def exercise():
+        publisher = asyncio.create_task(service._publish_loop())
+        try:
+            await asyncio.wait_for(guidance_applied.wait(), timeout=1)
+        finally:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
+
+    asyncio.run(exercise())
+    paths = [path for path, _ in calls]
+    assert paths == (["/api/hardware/presence"] if queued_event else []) + [
+        "/api/hardware/heartbeat"]
+    heartbeat = calls[-1][1]["snapshot"]
+    assert heartbeat["esp"]["boot_id"] == "reboot_2"
+    assert heartbeat["esp"]["connection"] == "online"
+    assert heartbeat["esp"]["telemetry"]["slots"] == slots
+    assert heartbeat["pending_presence_count"] == 0
+    assert not any(service.gpio.outputs.values())
 
 
 def test_reed_polarity_and_debounce():

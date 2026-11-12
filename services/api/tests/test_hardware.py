@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,6 +13,11 @@ from app.config import Settings
 from app.main import create_app
 from app.repositories.supabase_kiosks import SupabaseKioskRepository
 from app.routes.hardware import HardwareSnapshot
+
+WORKFLOW_MIGRATION = (Path(__file__).resolve().parents[3]
+                      / "supabase/migrations/202611110002_sauli_workflow_unlock_and_incident_corrections.sql")
+PRESENCE_MIGRATION = (Path(__file__).resolve().parents[3]
+                      / "supabase/migrations/202611090001_sauli_hardware_presence.sql")
 
 
 def snapshot():
@@ -84,6 +90,77 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
     assert response.status_code == 200
     assert response.json() == {"device_id": device["id"], "commands": [],
                                "guidance": {"modes": {"P-01": "OFF"}, "buzzer": False}}
+
+
+def test_fresh_reboot_snapshot_is_reconciled_before_alarm_guidance():
+    device = {"id": str(uuid4()), "unit_id": str(uuid4())}
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False))
+    app.dependency_overrides[get_device] = lambda: device
+    calls = []
+    slots = [
+        {"code": code, "ready": True, "calibrated": True,
+         "present": code != "P-01", "fault": None}
+        for code in [*(f"P-{number:02d}" for number in range(1, 9)),
+                     *(f"M-{number:02d}" for number in range(1, 5))]
+    ]
+
+    class Kiosks:
+        async def hardware_heartbeat(self, incoming, data):
+            calls.append("reconcile")
+            assert incoming == device
+            assert data["esp"]["boot_id"] == "reboot_2"
+            assert data["esp"]["connection"] == "online"
+            observed = data["esp"]["telemetry"]["slots"]
+            assert len(observed) == 12
+            assert [(row["code"], row["present"], row["ready"]) for row in observed] == [
+                (row["code"], row["present"], row["ready"]) for row in slots]
+            assert data["pending_presence_count"] == 0
+
+        async def claim_hardware_commands(self, incoming):
+            calls.append("claim")
+            assert incoming == device
+            return []
+
+        async def hardware_guidance(self, incoming):
+            calls.append("guidance")
+            assert incoming == device
+            return {"modes": {"P-01": "SOS_BLINK"}, "buzzer": True}
+
+    app.state.kiosks = Kiosks()
+    data = snapshot()
+    data["esp"] = {"connection": "online", "boot_id": "reboot_2",
+                   "telemetry_at": datetime.now(UTC).isoformat(),
+                   "telemetry": {"v": 1, "type": "telemetry", "seq": 1,
+                                 "uptime_ms": 500, "slots": slots}}
+    data["pending_presence_count"] = 0
+    with TestClient(app) as client:
+        response = client.post("/api/hardware/heartbeat", json={"snapshot": data})
+    assert response.status_code == 200
+    assert calls == ["reconcile", "claim", "guidance"]
+    assert response.json()["guidance"] == {"modes": {"P-01": "SOS_BLINK"}, "buzzer": True}
+
+
+def test_reboot_snapshot_sql_detects_both_mismatches_before_idle_and_deduplicates():
+    sql = WORKFLOW_MIGRATION.read_text(encoding="utf-8").lower()
+    reconcile = sql.split("create or replace function public.sauli_reconcile_hardware_workflow", 1)[1]
+    before_idle = reconcile.split("if v_slot.id is null or v_item.id is null then", 1)[0]
+    assert "p_snapshot #>> '{pi,mode}' = 'real'" in before_idle
+    assert "p_snapshot #>> '{esp,connection}' = 'online'" in before_idle
+    assert "v_boot is not null and v_pending = 0" in before_idle
+    assert "v_telemetry_at between now() - interval '5 seconds'" in before_idle
+    assert "v_reading->>'ready' is distinct from 'true'" in before_idle
+    assert "(v_sensed_present and v_observed_slot.status='available')" in before_idle
+    assert "(not v_sensed_present and v_observed_slot.status='occupied')" in before_idle
+    assert "case when v_sensed_present then 'wrong_placement' else 'wrong_removal' end" in before_idle
+    assert "on conflict do nothing" in before_idle
+    assert "update public.sauli_hardware_incidents set active=false,resolved_at=now()" in before_idle
+
+    presence_sql = PRESENCE_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "on public.sauli_hardware_incidents(unit_id,slot_id) where active" in presence_sql
+    guidance = sql.split("create or replace function public.sauli_hardware_guidance", 1)[1]
+    guidance = guidance.split("create or replace function public.sauli_reconcile_hardware_workflow", 1)[0]
+    assert "and slot_id = v_slot.id and active) then 'sos_blink'" in guidance
+    assert "'buzzer',v_buzzer" in guidance
 
 
 def test_public_status_is_read_only_and_admin_control_disabled_by_default():
