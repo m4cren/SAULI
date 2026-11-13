@@ -24,6 +24,21 @@ PRESENCE_SLOTS = {f"P-{number:02d}" for number in range(1, 9)} | {
     f"M-{number:02d}" for number in range(1, 5)}
 
 
+def configure_logging() -> None:
+    """Send controller events to stderr, which systemd captures in the journal."""
+    LOG.setLevel(logging.INFO)
+    if not LOG.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+        LOG.addHandler(handler)
+    LOG.propagate = False
+
+
+def log_event(event: str, **fields: object) -> None:
+    """Only call with explicitly selected, non-secret fields."""
+    LOG.info("%s", json.dumps({"event": event, **fields}, sort_keys=True, separators=(",", ":")))
+
+
 def valid_presence_event(event: dict) -> bool:
     """Match FastAPI's presence contract before an event enters the retry queue."""
     event_id = event.get("event_id")
@@ -104,6 +119,9 @@ class HardwareService:
         self._last_guidance: dict | None = None
         self._last_guidance_sent = 0.0
         self._last_esp_connection = False
+        self._esp_online = False
+        self._logged_presence_ids: deque[str] = deque(maxlen=256)
+        self._logged_presence_set: set[str] = set()
         self._buzzer_started: float | None = None
         self._capture_light_deadline: float | None = None
         self._sample_seconds = float(settings.get("gpio_sample_seconds", 0.05))
@@ -115,6 +133,9 @@ class HardwareService:
         self.task: asyncio.Task | None = None
 
     def event(self, kind: str, command_id: str | None = None) -> None:
+        if kind == "esp_disconnected" and self._esp_online:
+            self._esp_online = False
+            log_event("esp_connection", state="disconnected", reason=self.esp.error or "connection_lost")
         entry = {"at": datetime.now(UTC).isoformat(), "kind": kind}
         if command_id:
             entry["command_id"] = command_id
@@ -150,6 +171,8 @@ class HardwareService:
             previous = self._last_door_states.get(name)
             if previous is not None and state != previous and state in {"open", "closed"}:
                 self.event(f"{name}_door_{state}")
+                log_event("reed_transition", door=name, gpio=GPIOController.INPUTS[name],
+                          previous=previous, current=state)
             self._last_door_states[name] = state
         if self.door_workflow.door:
             observed = self.gpio.doors[self.door_workflow.door].snapshot()["door"]
@@ -159,7 +182,13 @@ class HardwareService:
 
     async def handle_command(self, row: dict) -> dict:
         command_id = str(row.get("id", ""))
+        action = row.get("action")
+        log_event("command_received", command_id=command_id,
+                  action=action if isinstance(action, str) and action in {
+                      "capture_light_on", "capture_light_off", "pulse_pocket", "pulse_medium"
+                  } else "unsupported")
         if command_id in self._seen:
+            log_event("command_failed", command_id=command_id, code="duplicate")
             return {"id": command_id, "status": "failed", "code": "duplicate"}
         if len(self._recent_commands) == self._recent_commands.maxlen:
             self._seen.discard(self._recent_commands[0])
@@ -177,12 +206,16 @@ class HardwareService:
                 raise ValueError("actuators_disabled")
             if not self.gpio.allow_outputs:
                 raise ValueError("outputs_unverified")
-            action = row.get("action")
             if action in {"capture_light_on", "capture_light_off"}:
                 enabled = action == "capture_light_on"
+                previous = self.gpio.outputs["main_light"]
                 self.gpio.set_output("main_light", enabled)
+                if previous != enabled:
+                    log_event("gpio_output", output="main_light", gpio=GPIOController.OUTPUTS["main_light"],
+                              previous=previous, current=enabled, command_id=command_id)
                 self._capture_light_deadline = (time.monotonic() + float(self.settings.get("capture_light_max_seconds", 12))) if enabled else None
                 self.event("command_completed", command_id)
+                log_event("command_completed", command_id=command_id, code="light_updated")
                 return {"id": command_id, "status": "acked", "code": "light_updated"}
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
@@ -201,19 +234,25 @@ class HardwareService:
             self._last_unlock["status"] = "accepted"
             self._last_unlock["accepted_at"] = datetime.now(UTC).isoformat()
             self.event("command_accepted", command_id)
+            log_event("command_accepted", command_id=command_id, door=door)
             self.door_workflow.pulsing()
             def activated() -> None:
                 self._last_unlock["activated_at"] = datetime.now(UTC).isoformat()
                 self.event("output_activated", command_id)
+                log_event("solenoid_pulse", command_id=command_id, door=door,
+                          gpio=GPIOController.OUTPUTS[f"{door}_solenoid"], state="activated")
 
             def deactivated() -> None:
                 self._last_unlock["deactivated_at"] = datetime.now(UTC).isoformat()
                 self.event("output_deactivated", command_id)
+                log_event("solenoid_pulse", command_id=command_id, door=door,
+                          gpio=GPIOController.OUTPUTS[f"{door}_solenoid"], state="deactivated")
 
             await self.gpio.pulse(door, on_activated=activated, on_deactivated=deactivated)
             self.door_workflow.pulse_finished()
             self._last_unlock["status"] = "completed"
             self.event("command_completed", command_id)
+            log_event("command_completed", command_id=command_id, code="pulse_completed")
             return {"id": command_id, "status": "acked", "code": "pulse_completed"}
         except (KeyError, ValueError, TypeError) as exc:
             if self._last_unlock is not None and self._last_unlock["command_id"] == command_id:
@@ -225,9 +264,11 @@ class HardwareService:
                             "test_channel_not_allowed",
                             "door_workflow_busy", "door_not_closed"}:
                 code = "invalid_command"
+            log_event("command_failed", command_id=command_id, code=code)
             return {"id": command_id, "status": "failed", "code": code}
-        except Exception:
-            LOG.exception("Hardware command failed (id=%s)", command_id)
+        except Exception as exc:
+            log_event("command_failed", command_id=command_id, code="hardware_failure",
+                      error_type=type(exc).__name__)
             if self._last_unlock is not None and self._last_unlock["command_id"] == command_id:
                 self._last_unlock["status"] = "failed"
                 self._last_unlock["last_output_error"] = "hardware_failure"
@@ -251,15 +292,21 @@ class HardwareService:
         next_ping = 0.0
         while True:
             if self.esp.serial is None:
+                if self._esp_online:
+                    self.event("esp_disconnected")
                 if time.monotonic() >= next_connect:
                     next_connect = time.monotonic() + 5
                     try:
                         await asyncio.to_thread(self.esp.connect)
+                        if not self._esp_online:
+                            self._esp_online = True
+                            log_event("esp_connection", state="connected", port=self.esp.port)
                         self._last_esp_connection = False
                         self._changed()
                     except (OSError, ImportError):
                         if self.esp.error != "serial_unavailable":
                             self.esp.error = "serial_unavailable"
+                            log_event("esp_connection", state="unavailable", port=self.esp.port)
                             self._changed()
                 await asyncio.sleep(0.25)
                 continue
@@ -270,6 +317,9 @@ class HardwareService:
             for message in messages:
                 if message["type"] == "hello":
                     self.event("esp_hello")
+                    if not self._esp_online:
+                        self._esp_online = True
+                        log_event("esp_connection", state="connected", port=self.esp.port)
                     self._last_esp_connection = False
                     try:
                         await self.esp.send({"v": 1, "type": "snapshot"})
@@ -282,6 +332,15 @@ class HardwareService:
                         if len(self._pending_presence) < 128 or event["event_id"] in self._pending_presence:
                             self._pending_presence[event["event_id"]] = event
                             self._publish_signal.set()
+                            if (event["kind"] != "SENSOR_SNAPSHOT" and
+                                    event["event_id"] not in self._logged_presence_set):
+                                if len(self._logged_presence_ids) == self._logged_presence_ids.maxlen:
+                                    self._logged_presence_set.discard(self._logged_presence_ids[0])
+                                self._logged_presence_ids.append(event["event_id"])
+                                self._logged_presence_set.add(event["event_id"])
+                                log_event("presence_change", slot=event["slot"],
+                                          previous=not event["present"], current=event["present"],
+                                          event_id=event["event_id"])
                     else:
                         # An API 422 would otherwise block all later events and heartbeats.
                         # Discard the bad frame and ask the ESP for a fresh baseline.
@@ -337,14 +396,25 @@ class HardwareService:
                 self._publish_signal.clear()
                 continue
             last_attempt = now
+            operation = "heartbeat"
+            operation_command_id: str | None = None
+            operation_slot: str | None = None
             try:
                 # A claimed command's acknowledgement is retried before claiming more work.
                 while self._pending_acks:
-                    await asyncio.to_thread(request_json, self.config.backend_url,
-                                            "/api/hardware/ack", self._pending_acks[0], self.credential)
+                    operation = "command_ack"
+                    operation_command_id = self._pending_acks[0]["id"]
+                    result = await asyncio.to_thread(request_json, self.config.backend_url,
+                                                     "/api/hardware/ack", self._pending_acks[0], self.credential)
+                    log_event("command_acknowledgment", command_id=operation_command_id,
+                              status=self._pending_acks[0]["status"],
+                              accepted=isinstance(result, dict) and result.get("ok") is True)
                     self._pending_acks.popleft()
                 while self._pending_presence:
                     event_id, event = next(iter(self._pending_presence.items()))
+                    operation = "presence"
+                    operation_command_id = None
+                    operation_slot = event["slot"]
                     await asyncio.to_thread(request_json, self.config.backend_url,
                                             "/api/hardware/presence", event, self.credential)
                     self._pending_presence.pop(event_id, None)
@@ -354,12 +424,15 @@ class HardwareService:
                         except ConnectionError:
                             pass  # ESP resends; the backend deduplicates the event ID.
                 sent_sequence = self._sequence
+                operation = "heartbeat"
+                operation_slot = None
                 result = await asyncio.to_thread(
                     request_json, self.config.backend_url, "/api/hardware/heartbeat",
                     {"snapshot": self.snapshot()}, self.credential)
                 if self.backend != "online":
                     self.backend = "online"
                     self._changed()
+                    log_event("backend_connection", state="online")
                 published_sequence = sent_sequence
                 last_success = time.monotonic()
                 backoff = 1.0
@@ -373,10 +446,15 @@ class HardwareService:
                     ack = await self.handle_command(row)
                     self._pending_acks.append(ack)
                 while self._pending_acks:
-                    await asyncio.to_thread(request_json, self.config.backend_url,
-                                            "/api/hardware/ack", self._pending_acks[0], self.credential)
+                    operation = "command_ack"
+                    operation_command_id = self._pending_acks[0]["id"]
+                    result = await asyncio.to_thread(request_json, self.config.backend_url,
+                                                     "/api/hardware/ack", self._pending_acks[0], self.credential)
+                    log_event("command_acknowledgment", command_id=operation_command_id,
+                              status=self._pending_acks[0]["status"],
+                              accepted=isinstance(result, dict) and result.get("ok") is True)
                     self._pending_acks.popleft()
-            except DeviceApiError:
+            except DeviceApiError as exc:
                 self._set_buzzer(False)
                 self._capture_light_deadline = None
                 self._capture_light_off()
@@ -384,9 +462,12 @@ class HardwareService:
                 if self.backend != "offline":
                     self.backend = "offline"
                     self.event("backend_unavailable")
+                    log_event("backend_communication_error", operation=operation,
+                              command_id=operation_command_id, slot=operation_slot,
+                              status_code=exc.status_code)
                 retry_at = time.monotonic() + backoff
                 backoff = min(backoff * 2, 30)
-            except Exception:
+            except Exception as exc:
                 self._set_buzzer(False)
                 self._capture_light_deadline = None
                 self._capture_light_off()
@@ -394,7 +475,9 @@ class HardwareService:
                 if self.backend != "offline":
                     self.backend = "offline"
                     self.event("backend_unavailable")
-                LOG.exception("Hardware publication failed")
+                    log_event("backend_communication_error", operation=operation,
+                              command_id=operation_command_id, slot=operation_slot,
+                              error_type=type(exc).__name__)
                 retry_at = time.monotonic() + backoff
                 backoff = min(backoff * 2, 30)
 
@@ -402,6 +485,8 @@ class HardwareService:
         self._capture_light_deadline = None
         if self.gpio.allow_outputs and self.gpio.outputs["main_light"]:
             self.gpio.set_output("main_light", False)
+            log_event("gpio_output", output="main_light", gpio=GPIOController.OUTPUTS["main_light"],
+                      previous=True, current=False, reason="automatic_off")
             self._changed()
 
     def _set_buzzer(self, requested: bool) -> None:
@@ -415,7 +500,10 @@ class HardwareService:
         if not requested:
             self._buzzer_started = None
         if self.gpio.outputs["buzzer"] != enabled:
+            previous = self.gpio.outputs["buzzer"]
             self.gpio.set_output("buzzer", enabled)
+            log_event("gpio_output", output="buzzer", gpio=GPIOController.OUTPUTS["buzzer"],
+                      previous=previous, current=enabled)
             self._changed()
 
     async def _clear_guidance(self) -> None:
@@ -520,6 +608,7 @@ def create_app(config: Config, settings: dict) -> FastAPI:
 
 
 def main() -> None:
+    configure_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path("/etc/sauli/controller.json"))
     parser.add_argument("--hardware", type=Path, default=Path("/etc/sauli/hardware.json"))

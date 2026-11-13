@@ -1,6 +1,8 @@
 """Hardware boundaries must stay deterministic without claiming real pins."""
 
 import asyncio
+import json
+import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -15,10 +17,43 @@ from sauli_pi.config import Config
 from sauli_pi.hardware.controller import DoorInput, GPIOController
 from sauli_pi.hardware_service import (
     HardwareService,
+    configure_logging,
     load_hardware,
     valid_presence_event,
 )
 from sauli_pi.workflows.door import DoorWorkflow
+
+
+def hardware_log_events(caplog) -> list[dict]:
+    return [json.loads(record.getMessage()) for record in caplog.records
+            if record.name == "sauli.hardware" and record.levelno == logging.INFO]
+
+
+@pytest.fixture
+def hardware_caplog(caplog):
+    logger = logging.getLogger("sauli.hardware")
+    logger.addHandler(caplog.handler)
+    previous_level = logger.level
+    previous_propagate = logger.propagate
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagate
+
+
+def test_hardware_logger_has_single_journal_stream_handler(monkeypatch):
+    logger = logging.Logger("test.sauli.hardware")
+    monkeypatch.setattr("sauli_pi.hardware_service.LOG", logger)
+    configure_logging()
+    configure_logging()
+    assert logger.level == logging.INFO
+    assert logger.propagate is False
+    assert len(logger.handlers) == 1
+    assert isinstance(logger.handlers[0], logging.StreamHandler)
 
 
 def test_frames_handle_partial_combined_boot_chatter_and_oversize():
@@ -202,7 +237,9 @@ def test_simulation_rejects_real_command_and_expired_command(tmp_path: Path):
     assert asyncio.run(service.handle_command(row))["code"] == "expired"
 
 
-def test_led_test_allowlist_pulses_only_selected_solenoid(tmp_path: Path):
+@pytest.mark.parametrize("door,pin", [("pocket", 27), ("medium", 23)])
+def test_led_test_allowlist_pulses_only_selected_solenoid(
+        tmp_path: Path, hardware_caplog, door: str, pin: int):
     device = str(uuid4())
     config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
                     "SAULI-A", tmp_path / "credential")
@@ -210,7 +247,7 @@ def test_led_test_allowlist_pulses_only_selected_solenoid(tmp_path: Path):
                 "reed_closed_level": {"pocket": 0, "medium": 0},
                 "output_active_high": {name: True for name in GPIOController.OUTPUTS},
                 "enable_actuators": True, "output_polarity_verified": True,
-                "solenoid_led_test_channel": "pocket"}
+                "solenoid_led_test_channel": door}
     service = HardwareService(config, settings)
     service.gpio = GPIOController(simulation=True,
                                   closed_level={"pocket": 0, "medium": 0},
@@ -218,23 +255,71 @@ def test_led_test_allowlist_pulses_only_selected_solenoid(tmp_path: Path):
                                   pulse_seconds=0.05, allow_outputs=True)
     service.gpio.open()
     service.gpio.sample_inputs()
-    service.gpio.set_simulated_door("pocket", 0)
-    service.gpio.doors["pocket"].update(0, now=time.monotonic() + 0.1)
+    service.gpio.set_simulated_door(door, 0)
+    service.gpio.doors[door].update(0, now=time.monotonic() + 0.1)
     expiry = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+    other_door = "medium" if door == "pocket" else "pocket"
 
     async def exercise():
         denied = await service.handle_command({"id": str(uuid4()), "device_id": device,
-                                               "action": "pulse_medium", "expires_at": expiry})
+                                               "action": f"pulse_{other_door}", "expires_at": expiry})
         assert denied["code"] == "test_channel_not_allowed"
-        assert not service.gpio.outputs["medium_solenoid"]
+        assert not service.gpio.outputs[f"{other_door}_solenoid"]
         accepted = await service.handle_command({"id": str(uuid4()), "device_id": device,
-                                                 "action": "pulse_pocket", "expires_at": expiry})
+                                                 "action": f"pulse_{door}", "expires_at": expiry})
         assert accepted["code"] == "pulse_completed"
         assert not service.gpio.outputs["pocket_solenoid"]
         assert not service.gpio.outputs["medium_solenoid"]
 
     asyncio.run(exercise())
     service.gpio.close()
+    events = hardware_log_events(hardware_caplog)
+    assert any(event["event"] == "command_failed" and
+               event["code"] == "test_channel_not_allowed" for event in events)
+    assert [(event["gpio"], event["state"]) for event in events
+            if event["event"] == "solenoid_pulse"] == [
+                (pin, "activated"), (pin, "deactivated")]
+    assert any(event["event"] == "command_completed" and
+               event["code"] == "pulse_completed" for event in events)
+
+
+def test_main_light_and_buzzer_log_only_state_changes(tmp_path: Path, hardware_caplog):
+    device = str(uuid4())
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "real", "device_id": device,
+                "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "enable_actuators": True, "output_polarity_verified": True}
+    service = HardwareService(config, settings)
+    service.gpio = GPIOController(simulation=True,
+                                  closed_level={"pocket": 0, "medium": 0},
+                                  active_high={name: True for name in GPIOController.OUTPUTS},
+                                  allow_outputs=True)
+    service.gpio.open()
+    expiry = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
+
+    async def exercise():
+        for action in ("capture_light_on", "capture_light_on", "capture_light_off",
+                       "capture_light_on"):
+            result = await service.handle_command({
+                "id": str(uuid4()), "device_id": device, "action": action,
+                "expires_at": expiry, "secret": "credential-never-log"})
+            assert result["status"] == "acked"
+        service._capture_light_off()
+        service._set_buzzer(True)
+        service._set_buzzer(True)
+        service._set_buzzer(False)
+
+    asyncio.run(exercise())
+    service.gpio.close()
+    outputs = [event for event in hardware_log_events(hardware_caplog)
+               if event["event"] == "gpio_output"]
+    assert [(event["gpio"], event["previous"], event["current"]) for event in outputs] == [
+        (24, False, True), (24, True, False), (24, False, True),
+        (24, True, False), (17, False, True), (17, True, False)]
+    assert outputs[3]["reason"] == "automatic_off"
+    assert "credential-never-log" not in hardware_caplog.text
 
 
 def test_real_config_requires_enrolled_uuid_and_explicit_polarity(tmp_path: Path):
@@ -269,7 +354,7 @@ def test_simulation_starts_without_device_credential(tmp_path: Path):
     asyncio.run(exercise())
 
 
-def test_reed_changes_are_recorded_after_debounce(tmp_path: Path):
+def test_reed_changes_are_recorded_after_debounce(tmp_path: Path, hardware_caplog):
     config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
                     "SAULI-A", tmp_path / "credential")
     settings = {"mode": "simulation", "reed_closed_level": {"pocket": 0, "medium": 0},
@@ -285,6 +370,11 @@ def test_reed_changes_are_recorded_after_debounce(tmp_path: Path):
     pocket.update(0, now=1.1)
     service.record_door_changes()
     assert service.events[0]["kind"] == "pocket_door_closed"
+    service.record_door_changes()
+    assert [event for event in hardware_log_events(hardware_caplog)
+            if event["event"] == "reed_transition"] == [
+                {"event": "reed_transition", "door": "pocket", "gpio": 7,
+                 "previous": "open", "current": "closed"}]
 
 
 def test_door_workflow_requires_closed_door_and_observes_both_transitions():
@@ -421,7 +511,7 @@ def test_gpio_and_workflow_continue_during_blocked_heartbeat(monkeypatch, tmp_pa
     assert maximum == 1
 
 
-def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path: Path):
+def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path: Path, hardware_caplog):
     config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
                     "SAULI-A", tmp_path / "credential")
     settings = {"mode": "simulation", "reed_closed_level": {"pocket": 0, "medium": 0},
@@ -441,7 +531,7 @@ def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path
             return {"commands": commands if requests.count(path) == 1 else []}
         if requests.count("/api/hardware/ack") == 1:
             from sauli_pi.communication.backend_client import DeviceApiError
-            raise DeviceApiError("temporary failure")
+            raise DeviceApiError("private-provider-response-never-log")
         return {"ok": True}
 
     async def fake_command(row):
@@ -461,6 +551,13 @@ def test_failed_ack_is_retried_without_reexecuting_command(monkeypatch, tmp_path
     assert executions == [row["id"] for row in reversed(commands)]
     assert requests[:5] == ["/api/hardware/heartbeat", "/api/hardware/ack",
                             "/api/hardware/ack", "/api/hardware/ack", "/api/hardware/heartbeat"]
+    events = hardware_log_events(hardware_caplog)
+    assert len([event for event in events if event["event"] == "backend_communication_error"]) == 1
+    assert [event["state"] for event in events if event["event"] == "backend_connection"] == [
+        "online", "online"]
+    assert [event["command_id"] for event in events
+            if event["event"] == "command_acknowledgment"] == executions
+    assert "private-provider-response-never-log" not in hardware_caplog.text
 
 
 def test_silent_esp_read_does_not_block_gpio_sampling(tmp_path: Path):
@@ -543,6 +640,53 @@ def test_invalid_esp_presence_does_not_enter_backend_retry_queue(tmp_path: Path)
     assert list(service._pending_presence) == ["boot-2"]
     assert {"v": 1, "type": "event_ack", "event_id": "boot-1"} in sent
     assert {"v": 1, "type": "snapshot"} in sent
+
+
+def test_esp_connection_and_presence_logs_omit_repeated_snapshots(tmp_path: Path, hardware_caplog):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "real", "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS}}
+    service = HardwareService(config, settings)
+    service.esp.serial = object()
+    change = {"type": "event", "event_id": "boot-1", "boot_id": "boot", "seq": 1,
+              "slot": "P-01", "kind": "ITEM_PRESENT", "present": True}
+    baseline = {**change, "event_id": "boot-2", "seq": 2,
+                "kind": "SENSOR_SNAPSHOT"}
+    batches = [[{"type": "hello", "boot_id": "boot"}, change], [change, baseline]]
+
+    async def read():
+        if batches:
+            return batches.pop(0)
+        service.esp.serial = None
+        await asyncio.sleep(0.01)
+        return []
+
+    async def send(_message):
+        return None
+
+    service.esp.read = read
+    service.esp.send = send
+
+    def offline_connect():
+        raise OSError("disconnected")
+
+    service.esp.connect = offline_connect
+
+    async def exercise():
+        task = asyncio.create_task(service._esp_loop())
+        await asyncio.sleep(0.08)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+    events = hardware_log_events(hardware_caplog)
+    assert [event["state"] for event in events if event["event"] == "esp_connection"] == [
+        "connected", "disconnected", "unavailable"]
+    assert [event for event in events if event["event"] == "presence_change"] == [
+        {"event": "presence_change", "slot": "P-01", "previous": False,
+         "current": True, "event_id": "boot-1"}]
+    assert not any(event["event"] in {"heartbeat", "sensor_snapshot"} for event in events)
 
 
 def test_guidance_clears_lights_and_buzzer_on_invalid_or_lost_backend(tmp_path: Path):
