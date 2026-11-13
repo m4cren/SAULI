@@ -45,6 +45,11 @@ class DeviceInput(BaseModel):
     hardware_type: str = Field(min_length=1, max_length=160)
 
 
+class ReviewResolutionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=20, max_length=500)
+
+
 @router.get("/locations")
 async def locations(request: Request):
     return await request.app.state.kiosks.locations()
@@ -105,3 +110,12 @@ async def revoke_device(request: Request, device_id: UUID, admin: Admin):
     if not await request.app.state.kiosks.revoke(device_id, UUID(admin.id)):
         raise ServiceError("DEVICE_NOT_FOUND", "Device not found.", 404)
     return {"revoked": True}
+
+
+@router.post("/admin/{unit_id}/hardware-review/rearm")
+async def rearm_unopened_hardware_review(
+    request: Request, unit_id: UUID, payload: ReviewResolutionInput, admin: Admin,
+):
+    return await request.app.state.kiosks.rearm_unopened_hardware_review(
+        unit_id, UUID(admin.id), payload.reason,
+    )

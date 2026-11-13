@@ -2,7 +2,7 @@
 -- SAULI PRODUCTION OPERATIONAL RESET
 -- Includes door-gated hardware transactions migration.
 -- Preserves kiosk registrations, credentials, browser sessions,
--- audit history, units, slot definitions, Auth users and Storage files.
+-- kiosk pairing audit history, units, slot definitions, Auth users and Storage files.
 --
 -- DESTRUCTIVE: Back up database, physically empty cabinet,
 -- and stop kiosk/hardware/backend/worker writes before execution.
@@ -28,6 +28,7 @@ BEGIN
         public.sauli_hardware_presence_events,
         public.sauli_hardware_incidents,
         public.sauli_hardware_transactions,
+        public.sauli_hardware_review_resolutions,
         public.found_items,
         public.storage_slots,
         public.storage_slot_events,
@@ -88,6 +89,7 @@ BEGIN
 
     -- The door-gated transaction table references both found_items
     -- and retrieval_sessions. Clear it FIRST to avoid FK 23503.
+    DELETE FROM public.sauli_hardware_review_resolutions;
     DELETE FROM public.sauli_hardware_transactions;
 
     DELETE FROM public.sauli_hardware_incidents;
@@ -126,6 +128,7 @@ BEGIN
 
     IF EXISTS (
         SELECT 1 FROM public.sauli_hardware_transactions
+        UNION ALL SELECT 1 FROM public.sauli_hardware_review_resolutions
         UNION ALL SELECT 1 FROM public.found_items
         UNION ALL SELECT 1 FROM public.missing_reports
         UNION ALL SELECT 1 FROM public.search_requests

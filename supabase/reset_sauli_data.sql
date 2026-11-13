@@ -33,6 +33,7 @@ lock table public.found_items, public.storage_slots, public.storage_slot_events,
   public.sauli_hardware_snapshots, public.sauli_hardware_commands,
   public.sauli_hardware_presence, public.sauli_hardware_presence_events,
   public.sauli_hardware_incidents, public.sauli_hardware_transactions,
+  public.sauli_hardware_review_resolutions,
   public.match_candidates, public.retrieval_sessions, public.retrieval_events,
   public.retrieval_logs, public.matching_jobs, public.email_notifications,
   public.missing_reports, public.search_requests, public.sauli_email_dispatch_clock
@@ -67,6 +68,9 @@ delete from public.sauli_hardware_commands where unit_id in
   (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
    or unit_code = current_setting('app.sauli_reset_unit_code'));
 delete from public.sauli_hardware_snapshots where unit_id in
+  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
+   or unit_code = current_setting('app.sauli_reset_unit_code'));
+delete from public.sauli_hardware_review_resolutions where unit_id in
   (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
    or unit_code = current_setting('app.sauli_reset_unit_code'));
 delete from public.sauli_hardware_transactions where unit_id in

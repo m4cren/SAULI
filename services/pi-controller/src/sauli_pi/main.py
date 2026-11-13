@@ -15,6 +15,8 @@ from sauli_pi.config import Config, read_credential, save_credential
 LOG = logging.getLogger("sauli.pi")
 VERSION = "0.1.0"
 BROWSER_RENEWAL_SECONDS = 7 * 60 * 60
+STARTUP_HEARTBEAT_ATTEMPTS = 3
+MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3
 
 
 def enroll(config: Config) -> None:
@@ -67,7 +69,16 @@ def browser_url(config: Config, credential: str) -> str:
 
 def run(config: Config) -> None:
     credential = read_credential(config.credential_file)
-    heartbeat(config, credential)  # Fail closed before starting Chromium.
+    for attempt in range(STARTUP_HEARTBEAT_ATTEMPTS):
+        try:
+            heartbeat(config, credential)  # Require a real authenticated response.
+            break
+        except DeviceApiError as exc:
+            if exc.status_code in (401, 403) or attempt == STARTUP_HEARTBEAT_ATTEMPTS - 1:
+                raise
+            LOG.warning("Kiosk startup heartbeat unavailable; retrying (%s/%s)",
+                        attempt + 1, STARTUP_HEARTBEAT_ATTEMPTS)
+            time.sleep(attempt + 1)
     url = browser_url(config, credential)
 
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -93,14 +104,21 @@ def run(config: Config) -> None:
     )
 
     started_at = time.monotonic()
+    consecutive_failures = 0
     LOG.info("Kiosk browser started for %s", config.device_code)
 
     while browser.poll() is None:
         time.sleep(config.heartbeat_seconds)
         try:
             heartbeat(config, credential)
-        except DeviceApiError:
-            LOG.error("Device heartbeat denied or unavailable; stopping kiosk browser")
+            consecutive_failures = 0
+        except DeviceApiError as exc:
+            consecutive_failures += 1
+            if exc.status_code not in (401, 403) and consecutive_failures < MAX_CONSECUTIVE_HEARTBEAT_FAILURES:
+                LOG.warning("Kiosk heartbeat temporarily unavailable (%s/%s)",
+                            consecutive_failures, MAX_CONSECUTIVE_HEARTBEAT_FAILURES)
+                continue
+            LOG.error("Device heartbeat denied or repeatedly unavailable; stopping kiosk browser")
             browser.terminate()
             try:
                 browser.wait(timeout=5)

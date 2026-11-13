@@ -6,7 +6,9 @@ from urllib.request import Request, urlopen
 
 
 class DeviceApiError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def request_json(origin: str, path: str, payload: dict, credential: str | None = None) -> dict:
@@ -21,6 +23,8 @@ def request_json(origin: str, path: str, payload: dict, credential: str | None =
             if not isinstance(result, dict):
                 raise DeviceApiError("Invalid backend response")
             return result
-    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+    except HTTPError as exc:
+        raise DeviceApiError("Device API request failed", exc.code) from exc
+    except (URLError, TimeoutError, ValueError) as exc:
         # Do not log provider bodies, credentials, or bootstrap codes.
         raise DeviceApiError("Device API request failed") from exc

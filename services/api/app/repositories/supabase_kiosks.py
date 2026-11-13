@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
+from postgrest.exceptions import APIError
 from starlette.concurrency import run_in_threadpool
 
 from app.core.errors import ServiceError
@@ -43,18 +44,23 @@ class SupabaseKioskRepository:
             for attempt in range(3):
                 try:
                     return fetch()
-                except httpx.TransportError as exc:
+                except (httpx.TransportError, APIError) as exc:
                     if attempt == 2:
-                        log.warning("Kiosk identity lookup failed", exc_info=True)
+                        log.warning("Kiosk identity lookup failed after retries (%s)", type(exc).__name__)
                         raise ServiceError("SUPABASE_UNAVAILABLE",
                                            "Kiosk service is temporarily unavailable. Please try again.", 503) from exc
                     time.sleep(0.2 * (attempt + 1))
         return await run_in_threadpool(retry)
 
     async def rpc(self, name: str, params: dict):
-        return await run_in_threadpool(
-            lambda: self.client().rpc(name, params).execute().data
-        )
+        try:
+            return await run_in_threadpool(
+                lambda: self.client().rpc(name, params).execute().data
+            )
+        except (httpx.TransportError, APIError) as exc:
+            log.warning("Kiosk database RPC unavailable: %s (%s)", name, type(exc).__name__)
+            raise ServiceError("SUPABASE_UNAVAILABLE",
+                               "Kiosk service is temporarily unavailable. Please try again.", 503) from exc
 
     async def check_rate_limit(self, action: str, subject: str, maximum: int) -> None:
         allowed = await self.rpc("sauli_check_kiosk_rate_limit", {
@@ -155,9 +161,14 @@ class SupabaseKioskRepository:
     async def bootstrap(self, device_id: str) -> dict:
         code = secret()
         expires = datetime.now(UTC) + timedelta(seconds=60)
-        await run_in_threadpool(lambda: self.client().table("kiosk_browser_bootstraps")
-            .insert({"device_id": device_id, "code_hash": digest(code),
-                     "expires_at": expires.isoformat()}).execute())
+        try:
+            await run_in_threadpool(lambda: self.client().table("kiosk_browser_bootstraps")
+                .insert({"device_id": device_id, "code_hash": digest(code),
+                         "expires_at": expires.isoformat()}).execute())
+        except (httpx.TransportError, APIError) as exc:
+            log.warning("Kiosk bootstrap write unavailable (%s)", type(exc).__name__)
+            raise ServiceError("SUPABASE_UNAVAILABLE",
+                               "Kiosk service is temporarily unavailable. Please try again.", 503) from exc
         return {"bootstrap_code": code, "expires_at": expires.isoformat()}
 
     async def redeem_bootstrap(self, code: str) -> dict:
@@ -198,9 +209,14 @@ class SupabaseKioskRepository:
             "p_device_id": str(device_id), "p_actor": str(admin_id)}))
 
     async def heartbeat(self, device: dict, version: str | None) -> None:
-        await run_in_threadpool(lambda: self.client().table("kiosk_devices")
-            .update({"last_seen_at": datetime.now(UTC).isoformat(),
-                     "controller_version": version}).eq("id", device["id"]).execute())
+        try:
+            await run_in_threadpool(lambda: self.client().table("kiosk_devices")
+                .update({"last_seen_at": datetime.now(UTC).isoformat(),
+                         "controller_version": version}).eq("id", device["id"]).execute())
+        except (httpx.TransportError, APIError) as exc:
+            log.warning("Kiosk heartbeat write unavailable (%s)", type(exc).__name__)
+            raise ServiceError("SUPABASE_UNAVAILABLE",
+                               "Kiosk service is temporarily unavailable. Please try again.", 503) from exc
 
     async def hardware_heartbeat(self, device: dict, snapshot: dict) -> None:
         result = await self.rpc("sauli_reconcile_hardware_workflow", {
@@ -219,6 +235,18 @@ class SupabaseKioskRepository:
 
     async def hardware_guidance(self, device: dict) -> dict:
         return await self.rpc("sauli_hardware_guidance", {"p_unit_id": device["unit_id"]})
+
+    async def rearm_unopened_hardware_review(
+        self, unit_id: UUID, actor_id: UUID, reason: str,
+    ) -> dict:
+        result = await self.rpc("sauli_rearm_unopened_hardware_review", {
+            "p_unit_id": str(unit_id), "p_actor_id": str(actor_id),
+            "p_reason": reason.strip(),
+        })
+        if not isinstance(result, dict) or result.get("error"):
+            raise ServiceError("REVIEW_REARM_DENIED",
+                               "Review could not be cleared. Check current hardware state.", 409)
+        return result
 
     async def enqueue_workflow_unlock(self, device: dict, *,
                                       item_id: str | None = None,
