@@ -1,6 +1,6 @@
 -- =====================================================
 -- SAULI PRODUCTION OPERATIONAL RESET
--- Includes door-gated hardware transactions migration.
+-- Includes the hardware review recovery records from 202611130001.
 -- Preserves kiosk registrations, credentials, browser sessions,
 -- kiosk pairing audit history, units, slot definitions, Auth users and Storage files.
 --
@@ -72,20 +72,19 @@ BEGIN
         RAISE EXCEPTION 'SAULI_RESET_SLOT_CONFIGURATION_INVALID';
     END IF;
 
+    -- Compare complete registration rows, including metadata added by later
+    -- migrations, so an indirect change also aborts the reset.
     SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
     INTO v_devices_before
-    FROM (SELECT id, unit_id, device_code, status, is_primary, revoked_at
-          FROM public.kiosk_devices) t;
+    FROM public.kiosk_devices t;
 
     SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
     INTO v_credentials_before
-    FROM (SELECT id, device_id, secret_hash, expires_at, revoked_at
-          FROM public.kiosk_device_credentials) t;
+    FROM public.kiosk_device_credentials t;
 
     SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
     INTO v_sessions_before
-    FROM (SELECT id, device_id, token_hash, expires_at, revoked_at
-          FROM public.kiosk_browser_sessions) t;
+    FROM public.kiosk_browser_sessions t;
 
     -- The door-gated transaction table references both found_items
     -- and retrieval_sessions. Clear it FIRST to avoid FK 23503.
@@ -122,9 +121,10 @@ BEGIN
     DELETE FROM public.missing_reports;
     DELETE FROM public.search_requests;
 
-    UPDATE public.sauli_email_dispatch_clock
-    SET next_allowed_at = now()
-    WHERE id = 1;
+    -- Restore the required singleton even if a previous reset left it absent.
+    INSERT INTO public.sauli_email_dispatch_clock (id, next_allowed_at)
+    VALUES (1, now())
+    ON CONFLICT (id) DO UPDATE SET next_allowed_at = EXCLUDED.next_allowed_at;
 
     IF EXISTS (
         SELECT 1 FROM public.sauli_hardware_transactions
@@ -174,18 +174,15 @@ BEGIN
 
     SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
     INTO v_devices_after
-    FROM (SELECT id, unit_id, device_code, status, is_primary, revoked_at
-          FROM public.kiosk_devices) t;
+    FROM public.kiosk_devices t;
 
     SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
     INTO v_credentials_after
-    FROM (SELECT id, device_id, secret_hash, expires_at, revoked_at
-          FROM public.kiosk_device_credentials) t;
+    FROM public.kiosk_device_credentials t;
 
     SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
     INTO v_sessions_after
-    FROM (SELECT id, device_id, token_hash, expires_at, revoked_at
-          FROM public.kiosk_browser_sessions) t;
+    FROM public.kiosk_browser_sessions t;
 
     IF v_devices_before IS DISTINCT FROM v_devices_after
        OR v_credentials_before IS DISTINCT FROM v_credentials_after
