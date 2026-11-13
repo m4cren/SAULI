@@ -1,100 +1,83 @@
-# SAULI hardware integration checkpoint — 2026-11-13
+# SAULI hardware integration checkpoint - 2026-11-13
 
-## Current state
+## Current working tree
 
-The working tree contains targeted, uncommitted recovery work. No migration, reset,
-deployment, firmware flash, or physical output test was run in this session.
-The registered kiosk, credential, unit records, production GPIO mapping, and GPIO3
-shutdown setup are unchanged.
+The current uncommitted work addresses the kiosk unlock 404 and intermittent
+Supabase read failures. No migration, reset, deployment, firmware flash, or
+physical actuation was performed. Registered kiosk records, the production GPIO
+map, the GPIO3 shutdown button, and ESP32 firmware are unchanged.
 
-## Completed implementation
+## Confirmed findings
 
-- FastAPI kiosk identity lookup retries transient PostgREST/transport failures and
-  returns a controlled 503 when Supabase is unavailable. Kiosk RPC, heartbeat, and
-  bootstrap writes also return a sanitized 503 for those failures. A credential
-  with NULL `expires_at` remains valid when active and not revoked.
-- The Pi kiosk controller retries transient startup heartbeat failures before
-  opening Chromium and tolerates two consecutive transient runtime failures.
-  HTTP 401/403 still stops it immediately. The HTTP client retains the status
-  code without exposing response bodies.
-- `202611130001_sauli_review_recovery_and_guidance.sql` makes audible buzzer and
-  SOS guidance depend on active incidents, while separately exposing
-  `review_required`. Active deposit incidents still highlight the assigned slot.
-  It adds an audit table and a service-role-only rearm RPC
-  for an unopened `requires_review` transaction. The RPC requires fresh,
-  complete, consistent Pi/ESP evidence, closed reeds, inactive outputs, no
-  active incident or pending command, and an administrator's review reason.
-  The RPC does not unlock a door. The admin-only FastAPI route invokes it.
-- Both manual reset scripts include the new audit table and continue to
-  preserve registered kiosks. Neither reset script was run.
-- The previously committed `202611110002_sauli_workflow_unlock_and_incident_corrections.sql`
-  compares every ready slot in a fresh ESP restart snapshot with database state.
-  It raises an incident for a mismatch and clears it when readings agree.
-  The existing regression tests cover this reboot path.
+- The kiosk submits `POST /api/kiosk/found-items/{id}/request-unlock` or
+  `POST /api/kiosk/retrieval-sessions/{id}/request-unlock`. FastAPI has both
+  authenticated endpoints, but the Next.js kiosk proxy rejected both paths with
+  404 before forwarding them. The proxy now allows those exact actions.
+- The supplied FastAPI traceback shows `httpx.ReadError` during a Supabase
+  workflow read. Safe read-only repository calls now retry transient transport
+  and PostgREST failures with bounded backoff, then return a controlled 503.
+  RPCs and writes are not automatically retried because a timeout may follow a
+  successful commit. The underlying network cause remains unconfirmed.
+- The P-01 snapshot reports PRESENT while the deposit has not completed. The
+  existing SQL unlock guard requires switch presence to agree with database
+  slot state. This mismatch must be investigated physically and in the database;
+  it must not be bypassed to make the solenoid pulse.
+- The existing `202611110002_sauli_workflow_unlock_and_incident_corrections.sql`
+  queue RPC is idempotent for an unexpired pending command and guards fresh
+  Pi/ESP evidence, closed reeds, inactive outputs, active incidents, and slot
+  consistency. No new SQL migration was needed for this change. Whether the
+  deployed database has this migration must be checked before a physical test.
 
-## Evidence and remaining limits
+## Implementation
 
-- Confirmed cause of the false alarm request: earlier `sauli_hardware_guidance`
-  treated `requires_review` as buzzer/SOS even with zero active incidents.
-  The new migration corrects the request; GPIO17 polarity and early boot
-  electrical behavior still require measurement. A hardware pull-down may be
-  needed to guarantee inactive level before software owns GPIO17.
-- The exact exception behind the observed production heartbeat HTTP 500 was
-  not supplied. The software now handles known PostgREST/transport failures,
-  but production logs and deployed SQL definitions must be checked if a 500
-  remains after rollout. No fake successful heartbeat was introduced.
-- The historical M-01 `requires_review` record cannot be attributed to a
-  specific missed command, reed edge, or reboot without its event/command
-  history. It remains blocked until an operator reviews and rearms it; no
-  production record was edited.
-- Frontend review messaging was already implemented in the current baseline;
-  frontend and ESP32 firmware have no uncommitted changes in this task.
-  Switches establish presence, not item identity. Physical lock and power
-  safety cannot be certified from mocked tests.
+- The proxy allowlist includes the two authenticated unlock actions.
+- The workflow response exposes the existing command status and returns a null
+  phase when no transaction exists. The kiosk uses that read to recover after
+  an ambiguous unlock POST without issuing an automatic second write.
+- A failed or rejected command shows a staff-attention message; a response that
+  could not be verified no longer claims that no command was queued.
+- Read-only identity, location, unit, device, workflow, and public hardware
+  status queries use the same bounded retry and sanitized 503 behavior.
 
-## Files in this working tree
+## Modified files
 
+- `frontend/app/api/kiosk/[...path]/route.ts`
+- `frontend/libs/api/kiosk-actions.ts` (new)
+- `frontend/app/kiosk/_hooks/useKioskFlow.tsx`
+- `frontend/app/kiosk/_hooks/kioskUnlockStatus.ts` (new)
+- `frontend/app/kiosk/_components/DoorUnlockNotice.tsx`
+- `frontend/libs/api/sauli.ts`
+- `frontend/tests/storage-flow.test.mjs`
 - `services/api/app/repositories/supabase_kiosks.py`
-- `services/api/app/routes/units.py`
-- `services/api/tests/test_kiosk_recovery.py`
-- `services/pi-controller/src/sauli_pi/communication/backend_client.py`
-- `services/pi-controller/src/sauli_pi/main.py`
-- `services/pi-controller/tests/test_kiosk_runtime.py`
-- `supabase/migrations/202611130001_sauli_review_recovery_and_guidance.sql`
-- `supabase/reset_sauli_data.sql`
-- `supabase/production_reset_sauli_data.sql`
-- `instruction.md`
+- `services/api/tests/test_hardware.py`
 - `SAULI_PROGRESS.md`
 
-## Verification completed
+## Verification
 
-- FastAPI: `python -m pytest -q` — 108 passed (61 deprecation warnings).
-- Pi controller: `PYTHONPATH=src python -m pytest -q` — 28 passed.
-- Frontend: `npm run lint` — passed with one pre-existing `ItemCaptureStep.tsx`
-  React hook dependency warning; `npx tsc --noEmit` — passed; `npm test` — 39 passed.
-- `git diff --check` — passed.
-- `pglast.parse_sql` parsed `202611110002`, new `202611130001`, and both
-  reset scripts. Parsing is not a live migration or schema integration test.
-- PlatformIO was unavailable, so firmware build was not run. Firmware is unchanged.
+- FastAPI: `python -m pytest -q` - 113 passed, 61 deprecation warnings.
+- Pi controller: `PYTHONPATH=src python -m pytest -q` - 28 passed.
+- Frontend: `npm test` - 41 passed; `npx tsc --noEmit` - passed;
+  `npm run lint` - passed with one existing `ItemCaptureStep.tsx` hook warning.
+- `git diff --check` - passed.
+- No live database, Raspberry Pi, ESP32, or solenoid test was performed.
 
-## Deployment dependencies and next step
+## Rollout and supervised test
 
-1. Review and commit the eleven files above. Confirm which migrations are already
-   applied in the target Supabase project. Apply only pending migrations in
-   filename order, with `202611110002` before `202611130001` if both are pending.
-   Do not run either reset script. The new migration must precede the matching
-   FastAPI and Pi code. Preserve the kiosk device and credential records.
-2. Deploy the tested FastAPI revision. Pull the same commit on the Pi at
-   `/home/sauli/sauli`, reinstall `services/pi-controller` in its existing venv,
-   and restart `sauli-pi-hardware.service`; follow `instruction.md`. No frontend
-   deployment or ESP32 flash is required for this working-tree change.
-3. In a supervised session with actuators disabled, check a normal authenticated
-   heartbeat, boot buzzer level, idle/review guidance, fresh ESP snapshot
-   mismatch incident and clearing, and the M-01 command/reed/event history.
-   Only if M-01 has never opened and all rearm guards pass, have an authorized
-   admin invoke the new rearm route with an audit reason; then verify normal
-   unlock handoff and provisional/final sensor behavior.
+1. Review and commit these changes. Confirm the production database has the
+   required existing workflow migration before testing; do not reapply a
+   migration merely because it appears in the repository.
+2. Deploy FastAPI and the Vercel frontend from the same commit. Pi and firmware
+   code did not change, so a Pi pull/restart is optional for version alignment.
+3. With staff present and the cabinet secured, inspect P-01's physical switch,
+   latest ESP snapshot, database slot state, active incidents, and transaction
+   history. Resolve the cause of the PRESENT/RESERVED mismatch without editing
+   evidence to force an unlock.
+4. Only after readiness evidence agrees, perform one authorized P-01 deposit.
+   Observe the queued command, one bounded GPIO27 pulse, command acknowledgment,
+   BCM7 reed opening, placement detection, door close, and final saved state.
+   Check that a second request does not create a second pulse. Do not infer
+   physical unlock from an HTTP response alone.
 
-The next implementation action, if validation finds a remaining fault, is to
-capture the exact FastAPI traceback and M-01 command/reed/event timeline and
-patch that specific failure without resetting or re-enrolling the kiosk.
+The implementation is ready for supervised physical hardware testing only after
+the deployed database definition and P-01 sensor discrepancy are checked. It has
+not yet been physically verified.

@@ -3,6 +3,29 @@ import assert from "node:assert/strict";
 import { pocketCodes, mediumCodes, slotCodes, slotTotals, isSlotCode } from "../libs/storage/slots.ts";
 import { initialKioskState, kioskReducer } from "../app/kiosk/_hooks/kioskReducer.ts";
 import { initialClaimantState, claimantReducer } from "../libs/claimant/claimantReducer.ts";
+import { isAllowedKioskAction } from "../libs/api/kiosk-actions.ts";
+import { resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+
+test("kiosk observes a committed unlock and does not show a failed command as waiting", () => {
+  const waiting = { phase: "awaiting_door_open", unlock_retry_available: false,
+    unlock_command_status: "pending", last_unlock: null };
+  assert.equal(resolveUnlockStatus("unavailable", waiting), "queued");
+  assert.equal(resolveUnlockStatus("queued", { ...waiting, unlock_command_status: "failed" }), "unavailable");
+  assert.equal(resolveUnlockStatus("queued", { ...waiting, unlock_command_status: "acked",
+    last_unlock: { status: "rejected" } }), "unavailable");
+  assert.equal(resolveUnlockStatus("queued", { ...waiting, phase: null,
+    unlock_command_status: null }), "unavailable");
+  assert.equal(resolveUnlockStatus("queued", { ...waiting, unlock_retry_available: true }), "unavailable");
+});
+
+test("kiosk proxy permits both guarded unlock requests and rejects unrelated actions", () => {
+  const id = "a74c1c56-650a-407e-b946-f2c25482093c";
+  assert.equal(isAllowedKioskAction(`found-items/${id}/request-unlock`), true);
+  assert.equal(isAllowedKioskAction(`retrieval-sessions/${id}/request-unlock`), true);
+  assert.equal(isAllowedKioskAction(`found-items/${id}/simulate-placement`), true);
+  assert.equal(isAllowedKioskAction(`found-items/${id}/delete`), false);
+  assert.equal(isAllowedKioskAction("found-items/not-a-uuid/request-unlock"), false);
+});
 
 const assigned = { item_id: "item-1", status: "available", storage_size: "medium", section: "Medium-size", slot_code: "M-02", slot_status: "reserved", placement_status: "reserved" };
 

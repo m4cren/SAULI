@@ -1,21 +1,13 @@
 import { cookies } from "next/headers";
 import { kioskBackendUrl, kioskCookieName } from "@/libs/api/kiosk-server";
-
-const allowed = [
-  /^found-items\/(analyze|reconcile-review|confirm-and-store)$/,
-  /^found-items\/[0-9a-f-]{36}\/simulate-placement$/,
-  /^storage-slots\/availability$/,
-  /^retrieval-sessions\/validate$/,
-  /^retrieval-sessions\/[0-9a-f-]{36}\/simulate-(completion|wrong-item|item-returned)$/,
-  /^hardware\/(workflow|capture-light)$/,
-];
+import { isAllowedKioskAction } from "@/libs/api/kiosk-actions";
 
 async function forward(request: Request, context: { params: Promise<{ path: string[] }> }) {
   if (request.method === "POST" && request.headers.get("origin") !== new URL(request.url).origin) {
     return Response.json({ error: { code: "KIOSK_ORIGIN_DENIED", message: "Kiosk request was denied." } }, { status: 403 });
   }
   const path = (await context.params).path.join("/");
-  if (!allowed.some((rule) => rule.test(path))) return Response.json({ error: "Unknown kiosk action." }, { status: 404 });
+  if (!isAllowedKioskAction(path)) return Response.json({ error: "Unknown kiosk action." }, { status: 404 });
   const token = (await cookies()).get(kioskCookieName)?.value;
   if (!token) return Response.json({ error: { code: "KIOSK_ACCESS_DENIED", message: "Kiosk registration required." } }, { status: 403 });
   const incoming = new URL(request.url);

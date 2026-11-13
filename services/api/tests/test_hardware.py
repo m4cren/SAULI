@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.auth.kiosk import get_device, get_kiosk_session
@@ -313,3 +314,154 @@ def test_expired_unclaimed_unlock_can_be_retried():
     workflow = asyncio.run(repository.hardware_workflow(
         {"unit_id": unit_id}, item_id=item_id, session_id=None))
     assert workflow["unlock_retry_available"] is True
+
+
+def test_workflow_read_recovers_from_one_dropped_connection(monkeypatch):
+    monkeypatch.setattr("app.repositories.supabase_kiosks.time.sleep", lambda _: None)
+    item_id, unit_id = str(uuid4()), str(uuid4())
+    attempts = 0
+
+    class Query:
+        def __init__(self, table): self.table = table
+        def select(self, _columns): return self
+        def eq(self, _column, _value): return self
+        def limit(self, _count): return self
+        def order(self, _column, desc=False): return self
+        def execute(self):
+            nonlocal attempts
+            if self.table == "found_items":
+                attempts += 1
+                if attempts == 1:
+                    raise httpx.ReadError("connection dropped")
+                return SimpleNamespace(data=[{"id": item_id, "unit_id": unit_id,
+                                              "placement_status": "reserved"}])
+            return SimpleNamespace(data=[])
+
+    class Database:
+        def table(self, name): return Query(name)
+
+    repository = SupabaseKioskRepository(None)
+    repository.client = lambda: Database()
+    workflow = asyncio.run(repository.hardware_workflow(
+        {"unit_id": unit_id}, item_id=item_id, session_id=None))
+    assert attempts == 2
+    assert workflow["placement_status"] == "reserved"
+    assert workflow["hardware_online"] is False
+    assert workflow["phase"] is None
+    assert workflow["unlock_command_status"] is None
+
+
+def test_workflow_exposes_committed_command_after_ambiguous_unlock_timeout():
+    unit_id, item_id, command_id = (str(uuid4()) for _ in range(3))
+
+    class Query:
+        def __init__(self, table): self.table = table
+        def select(self, _columns): return self
+        def eq(self, _column, _value): return self
+        def limit(self, _count): return self
+        def order(self, _column, desc=False): return self
+        def execute(self):
+            rows = {
+                "found_items": [{"id": item_id, "unit_id": unit_id,
+                                 "placement_status": "reserved"}],
+                "sauli_hardware_incidents": [],
+                "sauli_hardware_snapshots": [],
+                "sauli_hardware_transactions": [{"phase": "awaiting_door_open",
+                    "last_door": "closed", "found_item_id": item_id,
+                    "retrieval_session_id": None, "command_id": command_id}],
+                "sauli_hardware_commands": [{"status": "pending",
+                    "expires_at": (datetime.now(UTC) + timedelta(seconds=30)).isoformat()}],
+            }
+            return SimpleNamespace(data=rows[self.table])
+
+    class Database:
+        def table(self, name): return Query(name)
+
+    calls = 0
+
+    class RpcQuery:
+        def execute(self):
+            nonlocal calls
+            calls += 1
+            raise httpx.ReadError("response lost after commit")
+
+    database = Database()
+    database.rpc = lambda _name, _params: RpcQuery()
+    repository = SupabaseKioskRepository(None)
+    repository.client = lambda: database
+    from app.core.errors import ServiceError
+    try:
+        asyncio.run(repository.enqueue_workflow_unlock(
+            {"id": str(uuid4()), "unit_id": unit_id}, item_id=item_id))
+        assert False, "The lost response must be surfaced"
+    except ServiceError as exc:
+        assert exc.status_code == 503
+    assert calls == 1  # A write must never be retried after an ambiguous result.
+    workflow = asyncio.run(repository.hardware_workflow(
+        {"unit_id": unit_id}, item_id=item_id, session_id=None))
+    assert workflow["unlock_command_status"] == "pending"
+    assert workflow["unlock_retry_available"] is False
+
+
+def test_unlock_sql_is_idempotent_and_rejects_presence_mismatch():
+    sql = WORKFLOW_MIGRATION.read_text(encoding="utf-8")
+    begin = sql.index("create or replace function public.sauli_queue_workflow_unlock")
+    end = sql.index("end $$;", begin)
+    body = sql[begin:end]
+    assert "v_command.status <> 'pending' or v_command.expires_at > now()" in body
+    assert "hp.present is distinct from (ss.status='occupied')" in body
+    assert "insert into public.sauli_hardware_commands" in body
+
+
+def test_workflow_read_outage_returns_503_not_404_or_500(monkeypatch):
+    monkeypatch.setattr("app.repositories.supabase_kiosks.time.sleep", lambda _: None)
+    item_id, unit_id = str(uuid4()), str(uuid4())
+    attempts = 0
+
+    class Query:
+        def select(self, _columns): return self
+        def eq(self, _column, _value): return self
+        def limit(self, _count): return self
+        def execute(self):
+            nonlocal attempts
+            attempts += 1
+            raise httpx.ReadError("connection dropped")
+
+    class Database:
+        def table(self, _name): return Query()
+
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False))
+    repository = SupabaseKioskRepository(None)
+    repository.client = lambda: Database()
+    app.state.kiosks = repository
+    app.dependency_overrides[get_kiosk_session] = lambda: {"unit_id": unit_id}
+    with TestClient(app) as client:
+        response = client.get("/api/hardware/workflow", params={"item_id": item_id})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "SUPABASE_UNAVAILABLE"
+    assert attempts == 3
+
+
+def test_unlock_retry_routes_forward_the_correct_kiosk_identity():
+    item_id, session_id, unit_id = str(uuid4()), str(uuid4()), str(uuid4())
+    kiosk = {"unit_id": unit_id}
+    calls = []
+
+    class Kiosks:
+        async def browser_session(self, _token):
+            return None
+
+        async def enqueue_workflow_unlock(self, incoming, *, item_id=None, session_id=None):
+            calls.append((incoming, item_id, session_id))
+            return {"status": "pending"}
+
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False))
+    app.state.kiosks = Kiosks()
+    with TestClient(app) as client:
+        assert client.post(f"/api/found-items/{item_id}/request-unlock").status_code in (401, 403)
+        app.dependency_overrides[get_kiosk_session] = lambda: kiosk
+        assert client.post(f"/api/found-items/{item_id}/request-unlock").json() == {"status": "pending"}
+        assert client.post(f"/api/retrieval-sessions/{session_id}/request-unlock").json() == {"status": "pending"}
+    assert calls == [(kiosk, item_id, None), (kiosk, None, session_id)]

@@ -37,20 +37,24 @@ class SupabaseKioskRepository:
     def client(self):
         return self.items.require()
 
-    async def _read_identity(self, fetch):
+    async def _read_with_retry(self, fetch, operation: str):
         def retry():
-            # Identity queries are reads; retry a dropped connection before
-            # reporting that Supabase is temporarily unavailable.
+            # Only read-only queries may be retried: a failed RPC or write may
+            # already have committed before its connection dropped.
             for attempt in range(3):
                 try:
                     return fetch()
                 except (httpx.TransportError, APIError) as exc:
                     if attempt == 2:
-                        log.warning("Kiosk identity lookup failed after retries (%s)", type(exc).__name__)
+                        log.warning("Kiosk %s read failed after retries (%s)",
+                                    operation, type(exc).__name__)
                         raise ServiceError("SUPABASE_UNAVAILABLE",
                                            "Kiosk service is temporarily unavailable. Please try again.", 503) from exc
                     time.sleep(0.2 * (attempt + 1))
         return await run_in_threadpool(retry)
+
+    async def _read_identity(self, fetch):
+        return await self._read_with_retry(fetch, "identity")
 
     async def rpc(self, name: str, params: dict):
         try:
@@ -71,18 +75,18 @@ class SupabaseKioskRepository:
             raise ServiceError("KIOSK_RATE_LIMITED", "Too many attempts. Try again later.", 429)
 
     async def locations(self) -> list[dict]:
-        return await run_in_threadpool(lambda: self.client().table("sauli_units")
+        return await self._read_with_retry(lambda: self.client().table("sauli_units")
             .select("id,unit_code,display_name,campus_code,campus_name,building_name,floor,location_description")
-            .eq("status", "active").order("unit_code").execute().data or [])
+            .eq("status", "active").order("unit_code").execute().data or [], "locations")
 
     async def units(self) -> list[dict]:
-        return await run_in_threadpool(lambda: self.client().table("sauli_units")
-            .select("*").order("unit_code").execute().data or [])
+        return await self._read_with_retry(lambda: self.client().table("sauli_units")
+            .select("*").order("unit_code").execute().data or [], "units")
 
     async def devices(self) -> list[dict]:
-        return await run_in_threadpool(lambda: self.client().table("kiosk_devices")
+        return await self._read_with_retry(lambda: self.client().table("kiosk_devices")
             .select("id,unit_id,device_code,hostname,hardware_type,status,is_primary,last_seen_at,controller_version,firmware_version,created_at,revoked_at")
-            .order("created_at").execute().data or [])
+            .order("created_at").execute().data or [], "devices")
 
     async def register_unit(self, data: dict) -> dict:
         return await self.rpc("sauli_register_unit", {"p_unit": data})
@@ -299,11 +303,15 @@ class SupabaseKioskRepository:
                 if (item_id and row["found_item_id"] == item_id) or
                    (session_id and row["retrieval_session_id"] == session_id)), None)
             unlock_retry_available = False
-            if transaction and transaction["phase"] == "awaiting_door_open" and transaction.get("command_id"):
+            unlock_command_status = None
+            if transaction and transaction.get("command_id"):
                 commands = (client.table("sauli_hardware_commands")
                     .select("status,expires_at").eq("id", transaction["command_id"])
                     .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
-                if commands and commands[0]["status"] == "pending":
+                if commands:
+                    unlock_command_status = commands[0]["status"]
+                if (commands and transaction["phase"] == "awaiting_door_open"
+                        and commands[0]["status"] == "pending"):
                     expires_at = datetime.fromisoformat(commands[0]["expires_at"].replace("Z", "+00:00"))
                     unlock_retry_available = expires_at <= datetime.now(UTC)
             online = False
@@ -326,11 +334,12 @@ class SupabaseKioskRepository:
                     "retrieval_status": session["status"] if session else None,
                     "wrong_slots": [codes.get(row["slot_id"], "unknown") for row in incidents],
                     "hardware_online": online,
-                    "phase": transaction["phase"] if transaction else "awaiting_door_open",
+                    "phase": transaction["phase"] if transaction else None,
                     "door": observed_door,
                     "last_unlock": last_unlock,
+                    "unlock_command_status": unlock_command_status,
                     "unlock_retry_available": unlock_retry_available}
-        return await run_in_threadpool(fetch)
+        return await self._read_with_retry(fetch, "workflow")
 
     async def claim_hardware_commands(self, device: dict) -> list[dict]:
         rows = await self.rpc("sauli_claim_hardware_commands", {
@@ -372,9 +381,9 @@ class SupabaseKioskRepository:
 
     async def public_hardware_status(self) -> dict:
         rows, units, devices = await asyncio.gather(
-            run_in_threadpool(lambda: self.client().table("sauli_hardware_snapshots")
+            self._read_with_retry(lambda: self.client().table("sauli_hardware_snapshots")
                 .select("device_id,unit_id,snapshot,received_at").order("received_at", desc=True)
-                .limit(50).execute().data or []),
+                .limit(50).execute().data or [], "hardware status"),
             self.locations(), self.devices())
         labels = {unit["id"]: unit["display_name"] for unit in units}
         active_devices = {device["id"] for device in devices

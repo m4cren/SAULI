@@ -7,6 +7,7 @@ import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots
 import type { Compartment } from "../_types/kiosk";
 import type { ImageKind } from "../_types/kiosk";
 import { initialKioskState, kioskReducer } from "./kioskReducer";
+import { resolveUnlockStatus, type KioskUnlockStatus } from "./kioskUnlockStatus";
 
 const allowedImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 let lightQueue: Promise<void> = Promise.resolve();
@@ -26,7 +27,8 @@ function useKioskFlow() {
   const [hardwarePhase, setHardwarePhase] = useState<HardwareWorkflow["phase"] | null>(null);
   const [hardwareDoor, setHardwareDoor] = useState<HardwareWorkflow["door"]>("unknown");
   const [lastUnlock, setLastUnlock] = useState<HardwareWorkflow["last_unlock"]>(null);
-  const [unlockStatus, setUnlockStatus] = useState<"queued" | "unavailable" | null>(null);
+  const [unlockCommandStatus, setUnlockCommandStatus] = useState<HardwareWorkflow["unlock_command_status"]>(null);
+  const [unlockStatus, setUnlockStatus] = useState<KioskUnlockStatus>(null);
   const [lightFault, setLightFault] = useState(false);
   const lightOwned = useRef(false);
   const files = useRef<{ front: File | null; back: File | null }>({ front: null, back: null });
@@ -98,7 +100,8 @@ function useKioskFlow() {
         setHardwarePhase(workflow.phase);
         setHardwareDoor(workflow.door);
         setLastUnlock(workflow.last_unlock);
-        if (workflow.unlock_retry_available) setUnlockStatus("unavailable");
+        setUnlockCommandStatus(workflow.unlock_command_status);
+        setUnlockStatus((current) => resolveUnlockStatus(current, workflow));
         if (assignment) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_PLACEMENT", slot: workflow.wrong_slots[0] });
           else if (state.modal === "wrongPlacement") dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
@@ -108,7 +111,7 @@ function useKioskFlow() {
           else if (state.modal === "wrongItem") dispatch({ type: "WRONG_ITEM_RETURNED" });
           else if (workflow.retrieval_status === "completed") dispatch({ type: "CORRECT_ITEM" });
         }
-      } catch { if (active) { setHardwareOnline(false); setHardwarePhase(null); setHardwareDoor("unknown"); setLastUnlock(null); } }
+      } catch { if (active) { setHardwareOnline(false); setHardwarePhase(null); setHardwareDoor("unknown"); setLastUnlock(null); setUnlockCommandStatus(null); } }
       finally { polling = false; }
     }
     void poll();
@@ -158,6 +161,7 @@ function useKioskFlow() {
     setHardwareDoor("unknown");
     setLastUnlock(null);
     setUnlockStatus(null);
+    setUnlockCommandStatus(null);
     setLightFault(false);
     dispatch({ type: "RESET" });
   }
@@ -285,7 +289,7 @@ function useKioskFlow() {
   }
 
   async function retryUnlock() {
-    if (busy || unlockStatus !== "unavailable" || lastUnlock?.status === "failed" || lastUnlock?.status === "rejected") return;
+    if (busy || unlockStatus !== "unavailable" || unlockCommandStatus === "failed" || lastUnlock?.status === "failed" || lastUnlock?.status === "rejected") return;
     const assignment = state.screen.mode === "found" ? state.assignment : null;
     const retrieval = state.screen.mode === "retrieve" ? state.validatedRetrieval : null;
     if (!assignment && !retrieval) return;
@@ -334,7 +338,7 @@ function useKioskFlow() {
   }
 
   return {
-    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, hardwareDoor, lastUnlock, unlockStatus, busy, analysis,
+    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, hardwareDoor, lastUnlock, unlockCommandStatus, unlockStatus, busy, analysis,
     setCaptureLightFault: setLightFault,
     selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr, retryUnlock,
     startFound: () => dispatch({ type: "START_FOUND" }),
