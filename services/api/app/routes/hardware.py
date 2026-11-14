@@ -148,8 +148,10 @@ class CaptureLightRequest(BaseModel):
 async def heartbeat(request: Request, payload: Heartbeat, device: Device):
     await request.app.state.kiosks.hardware_heartbeat(
         device, payload.snapshot.model_dump(mode="json"))
-    commands = await request.app.state.kiosks.claim_hardware_commands(device)
     guidance = await request.app.state.kiosks.hardware_guidance(device)
+    # Claim is a state-changing RPC. Keep it last: if guidance fails, the Pi
+    # must not lose a claimed command in a 503 response.
+    commands = await request.app.state.kiosks.claim_hardware_commands(device)
     return {"device_id": device["id"], "commands": commands, "guidance": guidance}
 
 

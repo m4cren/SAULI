@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.kiosk import get_device, get_kiosk_session
 from app.config import Settings
+from app.core.errors import ServiceError
 from app.main import create_app
 from app.repositories.supabase_kiosks import SupabaseKioskRepository
 from app.routes.hardware import HardwareSnapshot
@@ -137,8 +139,70 @@ def test_fresh_reboot_snapshot_is_reconciled_before_alarm_guidance():
     with TestClient(app) as client:
         response = client.post("/api/hardware/heartbeat", json={"snapshot": data})
     assert response.status_code == 200
-    assert calls == ["reconcile", "claim", "guidance"]
+    assert calls == ["reconcile", "guidance", "claim"]
     assert response.json()["guidance"] == {"modes": {"P-01": "SOS_BLINK"}, "buzzer": True}
+
+
+def test_guidance_outage_does_not_claim_an_unlock_command():
+    device = {"id": str(uuid4()), "unit_id": str(uuid4())}
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False))
+    app.dependency_overrides[get_device] = lambda: device
+    calls = []
+
+    class Kiosks:
+        async def hardware_heartbeat(self, incoming, _snapshot):
+            assert incoming == device
+            calls.append("reconcile")
+
+        async def hardware_guidance(self, incoming):
+            assert incoming == device
+            calls.append("guidance")
+            raise ServiceError("SUPABASE_UNAVAILABLE", "Hardware service is unavailable.", 503)
+
+        async def claim_hardware_commands(self, _incoming):
+            calls.append("claim")
+            return [{"id": str(uuid4()), "kind": "unlock"}]
+
+    app.state.kiosks = Kiosks()
+    with TestClient(app) as client:
+        response = client.post("/api/hardware/heartbeat", json={"snapshot": snapshot()})
+    assert response.status_code == 503
+    assert calls == ["reconcile", "guidance"]
+
+
+def test_hardware_guidance_retries_read_error_without_replaying_commands(monkeypatch):
+    monkeypatch.setattr("app.repositories.supabase_kiosks.time.sleep", lambda _seconds: None)
+    unit_id = str(uuid4())
+
+    class Client:
+        calls = 0
+        fail_until = 2
+
+        def rpc(self, name, params):
+            assert name == "sauli_hardware_guidance"
+            assert params == {"p_unit_id": unit_id}
+            return self
+
+        def execute(self):
+            self.calls += 1
+            if self.calls <= self.fail_until:
+                raise httpx.ReadError("connection reset")
+            return SimpleNamespace(data={"modes": {"P-01": "NORMAL_BLINK"}, "buzzer": False})
+
+    repo = SupabaseKioskRepository(items=None)
+    client = Client()
+    repo.client = lambda: client
+    assert asyncio.run(repo.hardware_guidance({"unit_id": unit_id}))["buzzer"] is False
+    assert client.calls == 3
+
+    client = Client()
+    client.fail_until = 3
+    repo.client = lambda: client
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(repo.hardware_guidance({"unit_id": unit_id}))
+    assert error.value.code == "SUPABASE_UNAVAILABLE"
+    assert error.value.status_code == 503
+    assert client.calls == 3
 
 
 def test_reboot_snapshot_sql_detects_both_mismatches_before_idle_and_deduplicates():

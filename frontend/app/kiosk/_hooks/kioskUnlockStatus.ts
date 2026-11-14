@@ -2,6 +2,12 @@ import type { HardwareWorkflow } from "@/libs/api/sauli";
 
 export type KioskUnlockStatus = "queued" | "unavailable" | null;
 
+export function isFinalizedPlacement(workflow: HardwareWorkflow): boolean {
+  return workflow.placement_status === "placed"
+    && workflow.phase === "completed"
+    && workflow.wrong_slots.length === 0;
+}
+
 export function resolveUnlockStatus(
   current: KioskUnlockStatus,
   workflow: HardwareWorkflow,

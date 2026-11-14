@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
+from postgrest.exceptions import APIError
 from starlette.concurrency import run_in_threadpool
 from supabase import Client, create_client
 
@@ -33,6 +34,22 @@ class SupabaseFoundItemRepository:
             raise ServiceError("SUPABASE_UNAVAILABLE", "Item storage is not configured. Please try again later.", 503)
         return self.client
 
+    async def _read_with_retry(self, fetch, operation: str):
+        def retry():
+            # A read may be repeated after a dropped connection. A write or RPC
+            # may already have committed, so neither belongs in this helper.
+            for attempt in range(3):
+                try:
+                    return fetch()
+                except (httpx.TransportError, APIError) as exc:
+                    if attempt == 2:
+                        log.warning("Found item %s read failed after retries (%s)",
+                                    operation, type(exc).__name__)
+                        raise ServiceError("SUPABASE_UNAVAILABLE",
+                                           "Item storage is unavailable. Please try again.", 503) from exc
+                    time.sleep(0.2 * (attempt + 1))
+        return await run_in_threadpool(retry)
+
     async def database_health(self) -> bool:
         try:
             client = self.require()
@@ -54,7 +71,9 @@ class SupabaseFoundItemRepository:
     async def find_by_key(self, key: UUID) -> dict | None:
         try:
             client = self.require()
-            response = await run_in_threadpool(lambda: client.table("found_items").select("id,unit_id,status,storage_size,placement_status,extraction_summary,found_location,found_at").eq("idempotency_key", str(key)).maybe_single().execute())
+            response = await self._read_with_retry(
+                lambda: client.table("found_items").select("id,unit_id,status,storage_size,placement_status,extraction_summary,found_location,found_at").eq("idempotency_key", str(key)).maybe_single().execute(),
+                "idempotency lookup")
             return response.data if response is not None else None
         except ServiceError:
             raise
@@ -102,8 +121,12 @@ class SupabaseFoundItemRepository:
     async def get_slot_for_item(self, item_id: UUID) -> dict | None:
         client = self.require()
         try:
-            result = await run_in_threadpool(lambda: client.table("storage_slots").select("*").eq("current_found_item_id", str(item_id)).maybe_single().execute())
+            result = await self._read_with_retry(
+                lambda: client.table("storage_slots").select("*").eq("current_found_item_id", str(item_id)).maybe_single().execute(),
+                "item slot lookup")
             return result.data if result else None
+        except ServiceError:
+            raise
         except Exception as exc:
             log.exception("Item slot lookup failed")
             raise ServiceError("SUPABASE_UNAVAILABLE", "Storage position is unavailable. Please try again.", 503) from exc
@@ -112,31 +135,24 @@ class SupabaseFoundItemRepository:
         client = self.require()
         try:
             def fetch():
-                # PostgREST retries some HTTP status codes, but a dropped
-                # connection raises before it receives any response. These
-                # two queries are reads, so a brief transport retry is safe.
-                for attempt in range(3):
-                    try:
-                        query = client.table("storage_slots").select("*")
-                        if unit_id is not None:
-                            query = query.eq("unit_id", str(unit_id))
-                        result = query.execute()
-                        rows = result.data or []
-                        rows.sort(key=lambda row: (row.get("unit_id", ""), 0 if row["size_class"] == "pocket" else 1, row["ordinal"]))
-                        if include_items:
-                            ids = [row["current_found_item_id"] for row in rows if row.get("current_found_item_id")]
-                            summaries = {}
-                            if ids:
-                                items = client.table("found_items").select("id,object_name").in_("id", ids).execute().data or []
-                                summaries = {item["id"]: item["object_name"] for item in items}
-                            for row in rows:
-                                row["item_summary"] = summaries.get(row.get("current_found_item_id"))
-                        return rows
-                    except httpx.TransportError:
-                        if attempt == 2:
-                            raise
-                        time.sleep(0.2 * (attempt + 1))
-            return await run_in_threadpool(fetch)
+                query = client.table("storage_slots").select("*")
+                if unit_id is not None:
+                    query = query.eq("unit_id", str(unit_id))
+                result = query.execute()
+                rows = result.data or []
+                rows.sort(key=lambda row: (row.get("unit_id", ""), 0 if row["size_class"] == "pocket" else 1, row["ordinal"]))
+                if include_items:
+                    ids = [row["current_found_item_id"] for row in rows if row.get("current_found_item_id")]
+                    summaries = {}
+                    if ids:
+                        items = client.table("found_items").select("id,object_name").in_("id", ids).execute().data or []
+                        summaries = {item["id"]: item["object_name"] for item in items}
+                    for row in rows:
+                        row["item_summary"] = summaries.get(row.get("current_found_item_id"))
+                return rows
+            return await self._read_with_retry(fetch, "slot listing")
+        except ServiceError:
+            raise
         except Exception as exc:
             log.exception("Storage slot listing failed")
             raise ServiceError("SUPABASE_UNAVAILABLE", "Container status is unavailable. Please try again.", 503) from exc
@@ -192,11 +208,15 @@ class SupabaseFoundItemRepository:
     async def get_item(self, item_id: UUID) -> dict | None:
         try:
             client = self.require()
-            result = await run_in_threadpool(lambda: client.table("found_items").select("id,status,placement_status,generic_name,object_name,extraction_summary,category,colors,visible_markings,condition,found_location,found_at,created_at,front_image_path,back_image_path,document_kind").eq("id", str(item_id)).maybe_single().execute())
+            result = await self._read_with_retry(
+                lambda: client.table("found_items").select("id,status,placement_status,generic_name,object_name,extraction_summary,category,colors,visible_markings,condition,found_location,found_at,created_at,front_image_path,back_image_path,document_kind").eq("id", str(item_id)).maybe_single().execute(),
+                "item lookup")
             if result is None or not result.data:
                 return None
             slot = await self.get_slot_for_item(item_id)
             return {**result.data, "slot_status": slot.get("status") if slot else None}
+        except ServiceError:
+            raise
         except Exception as exc:
             log.exception("Found item lookup failed")
             raise ServiceError("SUPABASE_UNAVAILABLE", "Item details are unavailable. Please try again.", 503) from exc
@@ -216,8 +236,10 @@ class SupabaseFoundItemRepository:
                 rows = query.order("created_at", desc=True).limit(min(max(limit, 1), 100)).execute().data or []
                 return [{**row, "slot_status": "occupied"} for row in rows]
 
-            result = await run_in_threadpool(fetch)
+            result = await self._read_with_retry(fetch, "eligible item query")
             return result
+        except ServiceError:
+            raise
         except Exception as exc:
             log.exception("Eligible item query failed")
             raise ServiceError("SUPABASE_UNAVAILABLE", "Item search is unavailable. Please try again.", 503) from exc
@@ -225,8 +247,12 @@ class SupabaseFoundItemRepository:
     async def find_search_by_key(self, key: UUID) -> dict | None:
         try:
             client = self.require()
-            result = await run_in_threadpool(lambda: client.table("search_requests").select("id,user_id,query_analysis,last_seen_location").eq("idempotency_key", str(key)).maybe_single().execute())
+            result = await self._read_with_retry(
+                lambda: client.table("search_requests").select("id,user_id,query_analysis,last_seen_location").eq("idempotency_key", str(key)).maybe_single().execute(),
+                "search idempotency lookup")
             return result.data if result is not None else None
+        except ServiceError:
+            raise
         except Exception as exc:
             log.exception("Search idempotency lookup failed")
             raise ServiceError("SUPABASE_UNAVAILABLE", "Item search is unavailable. Please try again.", 503) from exc

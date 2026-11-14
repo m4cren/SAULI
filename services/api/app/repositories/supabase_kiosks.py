@@ -238,7 +238,14 @@ class SupabaseKioskRepository:
         })
 
     async def hardware_guidance(self, device: dict) -> dict:
-        return await self.rpc("sauli_hardware_guidance", {"p_unit_id": device["unit_id"]})
+        # This RPC only reads slot, incident, and workflow state. A dropped
+        # response cannot have changed the database, so bounded retry is safe.
+        return await self._read_with_retry(
+            lambda: self.client().rpc("sauli_hardware_guidance", {
+                "p_unit_id": device["unit_id"],
+            }).execute().data,
+            "hardware guidance",
+        )
 
     async def rearm_unopened_hardware_review(
         self, unit_id: UUID, actor_id: UUID, reason: str,

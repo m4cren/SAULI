@@ -4,7 +4,16 @@ import { pocketCodes, mediumCodes, slotCodes, slotTotals, isSlotCode } from "../
 import { initialKioskState, kioskReducer } from "../app/kiosk/_hooks/kioskReducer.ts";
 import { initialClaimantState, claimantReducer } from "../libs/claimant/claimantReducer.ts";
 import { isAllowedKioskAction } from "../libs/api/kiosk-actions.ts";
-import { resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+import { isFinalizedPlacement, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+
+test("kiosk waits for a completed backend placement before showing success", () => {
+  const workflow = { placement_status: "reserved", phase: "provisional_success", wrong_slots: [] };
+  assert.equal(isFinalizedPlacement(workflow), false);
+  assert.equal(isFinalizedPlacement({ ...workflow, phase: "awaiting_door_close" }), false);
+  assert.equal(isFinalizedPlacement({ ...workflow, placement_status: "placed" }), false);
+  assert.equal(isFinalizedPlacement({ ...workflow, placement_status: "placed", phase: "completed", wrong_slots: ["P-02"] }), false);
+  assert.equal(isFinalizedPlacement({ ...workflow, placement_status: "placed", phase: "completed" }), true);
+});
 
 test("kiosk observes a committed unlock and does not show a failed command as waiting", () => {
   const waiting = { phase: "awaiting_door_open", unlock_retry_available: false,

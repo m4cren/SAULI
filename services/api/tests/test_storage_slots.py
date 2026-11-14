@@ -105,6 +105,47 @@ def test_slot_listing_retries_transient_network_reads_and_keeps_503_on_outage(mo
     assert repo.client.calls == 3
 
 
+def test_found_item_idempotency_lookup_retries_read_error_without_repeating_write(monkeypatch):
+    monkeypatch.setattr("app.repositories.supabase_found_items.time.sleep", lambda _seconds: None)
+    item_id = str(uuid4())
+
+    class Client:
+        calls = 0
+        fail_until = 2
+
+        def table(self, name):
+            assert name == "found_items"
+            return self
+
+        def select(self, _columns):
+            return self
+
+        def eq(self, column, _value):
+            assert column == "idempotency_key"
+            return self
+
+        def maybe_single(self):
+            return self
+
+        def execute(self):
+            self.calls += 1
+            if self.calls <= self.fail_until:
+                raise httpx.ReadError("dropped connection")
+            return SimpleNamespace(data={"id": item_id})
+
+    repo = SupabaseFoundItemRepository(Settings())
+    repo.client = Client()
+    assert asyncio.run(repo.find_by_key(uuid4())) == {"id": item_id}
+    assert repo.client.calls == 3
+
+    repo.client = Client()
+    repo.client.fail_until = 3
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(repo.find_by_key(uuid4()))
+    assert error.value.code == "SUPABASE_UNAVAILABLE"
+    assert error.value.status_code == 503
+    assert repo.client.calls == 3
+
 def test_only_placed_occupied_items_are_searchable():
     base = {"status": "available", "created_at": datetime.now(timezone.utc).isoformat()}
     assert not eligible({**base, "placement_status": "reserved", "slot_status": "reserved"}, None)

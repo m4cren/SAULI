@@ -1,83 +1,83 @@
-# SAULI hardware integration checkpoint - 2026-11-13
+# SAULI hardware integration checkpoint - 2026-11-14
 
-## Current working tree
+## Scope and evidence
 
-The current uncommitted work addresses the kiosk unlock 404 and intermittent
-Supabase read failures. No migration, reset, deployment, firmware flash, or
-physical actuation was performed. Registered kiosk records, the production GPIO
-map, the GPIO3 shutdown button, and ESP32 firmware are unchanged.
+This working tree improves deposit verification and recovery from intermittent
+Supabase reads. It does not change the Raspberry Pi controller, ESP32 firmware,
+production GPIO map, GPIO3 shutdown button, kiosk registration, or database
+schema. No migration, reset, deployment, flash, or physical actuation was run.
 
-## Confirmed findings
+The supplied Pi log confirms ESP32 connectivity, brief backend 503 responses
+followed by recovery, a P-08 presence transition, and P-02 presence. The
+provided interval does **not** show a P-01 presence or reed transition, an
+unlock command receipt, or a GPIO27 pulse. It cannot establish why P-01 did
+not physically unlock. Earlier database evidence showed P-01 PRESENT while
+its deposit had not completed. The existing SQL queue guard requires sensor
+presence to agree with the slot record; that discrepancy must be checked, not
+bypassed.
 
-- The kiosk submits `POST /api/kiosk/found-items/{id}/request-unlock` or
-  `POST /api/kiosk/retrieval-sessions/{id}/request-unlock`. FastAPI has both
-  authenticated endpoints, but the Next.js kiosk proxy rejected both paths with
-  404 before forwarding them. The proxy now allows those exact actions.
-- The supplied FastAPI traceback shows `httpx.ReadError` during a Supabase
-  workflow read. Safe read-only repository calls now retry transient transport
-  and PostgREST failures with bounded backoff, then return a controlled 503.
-  RPCs and writes are not automatically retried because a timeout may follow a
-  successful commit. The underlying network cause remains unconfirmed.
-- The P-01 snapshot reports PRESENT while the deposit has not completed. The
-  existing SQL unlock guard requires switch presence to agree with database
-  slot state. This mismatch must be investigated physically and in the database;
-  it must not be bypassed to make the solenoid pulse.
-- The existing `202611110002_sauli_workflow_unlock_and_incident_corrections.sql`
-  queue RPC is idempotent for an unexpired pending command and guards fresh
-  Pi/ESP evidence, closed reeds, inactive outputs, active incidents, and slot
-  consistency. No new SQL migration was needed for this change. Whether the
-  deployed database has this migration must be checked before a physical test.
+The previously committed kiosk proxy fix forwards the authenticated unlock
+routes. This checkpoint does not change that proxy or its route allowlist.
 
-## Implementation
+## Changes in this working tree
 
-- The proxy allowlist includes the two authenticated unlock actions.
-- The workflow response exposes the existing command status and returns a null
-  phase when no transaction exists. The kiosk uses that read to recover after
-  an ambiguous unlock POST without issuing an automatic second write.
-- A failed or rejected command shows a staff-attention message; a response that
-  could not be verified no longer claims that no command was queued.
-- Read-only identity, location, unit, device, workflow, and public hardware
-  status queries use the same bounded retry and sanitized 503 behavior.
+- Read-only found-item and slot lookups retry transient transport/PostgREST
+  failures with bounded backoff and return a controlled 503 after exhaustion.
+  State-changing writes and RPCs are not retried automatically.
+- Hardware guidance, which is a read-only RPC, uses the same bounded retry.
+  Heartbeat reconciliation runs before guidance, and command claiming runs
+  last. A guidance failure therefore cannot claim a command and then discard
+  it in a failed heartbeat response.
+- The kiosk shows a distinct verification state after a provisional sensor
+  detection and door closure. It shows final placement success only when the
+  backend reports `placement_status=placed`, transaction `phase=completed`,
+  and no wrong slots.
+- Regression tests cover guidance failure before claim, guidance and item-read
+  retries, and the kiosk's final-placement condition.
 
-## Modified files
+## Files changed
 
-- `frontend/app/api/kiosk/[...path]/route.ts`
-- `frontend/libs/api/kiosk-actions.ts` (new)
+- `frontend/app/kiosk/_components/PlacementScreen.tsx`
+- `frontend/app/kiosk/_hooks/kioskUnlockStatus.ts`
 - `frontend/app/kiosk/_hooks/useKioskFlow.tsx`
-- `frontend/app/kiosk/_hooks/kioskUnlockStatus.ts` (new)
-- `frontend/app/kiosk/_components/DoorUnlockNotice.tsx`
-- `frontend/libs/api/sauli.ts`
 - `frontend/tests/storage-flow.test.mjs`
+- `services/api/app/repositories/supabase_found_items.py`
 - `services/api/app/repositories/supabase_kiosks.py`
+- `services/api/app/routes/hardware.py`
 - `services/api/tests/test_hardware.py`
+- `services/api/tests/test_storage_slots.py`
 - `SAULI_PROGRESS.md`
 
 ## Verification
 
-- FastAPI: `python -m pytest -q` - 113 passed, 61 deprecation warnings.
-- Pi controller: `PYTHONPATH=src python -m pytest -q` - 28 passed.
-- Frontend: `npm test` - 41 passed; `npx tsc --noEmit` - passed;
-  `npm run lint` - passed with one existing `ItemCaptureStep.tsx` hook warning.
+- FastAPI: `python -m pytest -q` - 116 passed, 61 warnings.
+- Pi controller: `PYTHONPATH=src python -m pytest -q` - 32 passed.
+- Frontend: `npm test` - 42 passed; `npx tsc --noEmit` - passed;
+  `npm run lint` - passed with one pre-existing `ItemCaptureStep.tsx` hook warning.
 - `git diff --check` - passed.
-- No live database, Raspberry Pi, ESP32, or solenoid test was performed.
+- No live database, Raspberry Pi, ESP32, reed switch, presence sensor, or
+  solenoid was exercised. A test of actual door movement remains necessary.
 
-## Rollout and supervised test
+## Deployment order and supervised physical test
 
-1. Review and commit these changes. Confirm the production database has the
-   required existing workflow migration before testing; do not reapply a
-   migration merely because it appears in the repository.
-2. Deploy FastAPI and the Vercel frontend from the same commit. Pi and firmware
-   code did not change, so a Pi pull/restart is optional for version alignment.
-3. With staff present and the cabinet secured, inspect P-01's physical switch,
-   latest ESP snapshot, database slot state, active incidents, and transaction
-   history. Resolve the cause of the PRESENT/RESERVED mismatch without editing
-   evidence to force an unlock.
-4. Only after readiness evidence agrees, perform one authorized P-01 deposit.
-   Observe the queued command, one bounded GPIO27 pulse, command acknowledgment,
-   BCM7 reed opening, placement detection, door close, and final saved state.
-   Check that a second request does not create a second pulse. Do not infer
-   physical unlock from an HTTP response alone.
+1. Review and commit the working tree. Confirm the deployed database has the
+   existing `202611110002` workflow definition and `202611130001` guidance
+   definition by inspecting the objects. Do not reapply a migration solely
+   because its history entry is absent. This change adds no migration.
+2. Deploy the FastAPI backend, then the frontend from the same commit. The Pi
+   and ESP32 code are unchanged. A Pi pull and service restart is optional for
+   version alignment; do it before the physical test if its checkout is behind.
+3. With staff present and the cabinet safe, inspect P-01's physical switch,
+   fresh ESP snapshot, database slot state, active incident, and transaction.
+   Resolve any PRESENT/reserved mismatch using observed physical state.
+4. Test one authorized pocket-size deposit. Observe one command ID and one
+   GPIO27 pulse, command acknowledgment, BCM7 reed opening, P-01 detection,
+   closure, and final `placed`/`completed` state. Confirm the kiosk stays in
+   verification before the final state and does not issue a second pulse.
+5. Test an unauthorized/wrong-position event and its safe clearance, then
+   repeat the authorized path for a medium-size slot and GPIO23/BCM8. Check
+   the behavior during a brief backend outage and ESP disconnect.
 
-The implementation is ready for supervised physical hardware testing only after
-the deployed database definition and P-01 sensor discrepancy are checked. It has
-not yet been physically verified.
+The implementation is ready for **supervised physical hardware testing after**
+the deployed SQL definitions and P-01 sensor discrepancy are checked. A physical
+unlock, sensor transition, and end-to-end placement have not been verified.

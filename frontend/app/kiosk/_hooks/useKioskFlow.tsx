@@ -7,7 +7,7 @@ import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots
 import type { Compartment } from "../_types/kiosk";
 import type { ImageKind } from "../_types/kiosk";
 import { initialKioskState, kioskReducer } from "./kioskReducer";
-import { resolveUnlockStatus, type KioskUnlockStatus } from "./kioskUnlockStatus";
+import { isFinalizedPlacement, resolveUnlockStatus, type KioskUnlockStatus } from "./kioskUnlockStatus";
 
 const allowedImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 let lightQueue: Promise<void> = Promise.resolve();
@@ -105,7 +105,7 @@ function useKioskFlow() {
         if (assignment) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_PLACEMENT", slot: workflow.wrong_slots[0] });
           else if (state.modal === "wrongPlacement") dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
-          else if (workflow.placement_status === "placed") dispatch({ type: "PLACEMENT_SUCCEEDED", assignment: { ...assignment, placement_status: "placed", slot_status: "occupied" } });
+          else if (isFinalizedPlacement(workflow)) dispatch({ type: "PLACEMENT_SUCCEEDED", assignment: { ...assignment, placement_status: "placed", slot_status: "occupied" } });
         } else if (retrieval) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_ITEM", slot: workflow.wrong_slots[0] });
           else if (state.modal === "wrongItem") dispatch({ type: "WRONG_ITEM_RETURNED" });
