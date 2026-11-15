@@ -115,6 +115,7 @@ class HardwareService:
         self._publish_signal = asyncio.Event()
         self._pending_acks: deque[dict] = deque()
         self._pending_presence: dict[str, dict] = {}
+        self._presence_upload_failed = False
         self._last_unlock: dict | None = None
         self._last_guidance: dict | None = None
         self._last_guidance_sent = 0.0
@@ -415,8 +416,20 @@ class HardwareService:
                     operation = "presence"
                     operation_command_id = None
                     operation_slot = event["slot"]
-                    await asyncio.to_thread(request_json, self.config.backend_url,
-                                            "/api/hardware/presence", event, self.credential)
+                    try:
+                        await asyncio.to_thread(request_json, self.config.backend_url,
+                                                "/api/hardware/presence", event, self.credential)
+                    except DeviceApiError as exc:
+                        # Keep the event queued, but still send a heartbeat so
+                        # the backend can observe the Pi and return guidance.
+                        if not self._presence_upload_failed:
+                            log_event("backend_communication_error", operation="presence",
+                                      slot=operation_slot, status_code=exc.status_code)
+                        self._presence_upload_failed = True
+                        break
+                    if self._presence_upload_failed:
+                        log_event("presence_upload_recovered", slot=operation_slot)
+                        self._presence_upload_failed = False
                     self._pending_presence.pop(event_id, None)
                     if self.esp.serial is not None:
                         try:

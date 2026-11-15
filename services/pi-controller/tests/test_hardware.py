@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 
 from sauli_pi.communication.esp32_serial import EspLink
+from sauli_pi.communication.backend_client import DeviceApiError
 from sauli_pi.communication.protocol import FrameDecoder, FrameError, encode_frame
 from sauli_pi.config import Config
 from sauli_pi.hardware.controller import DoorInput, GPIOController
@@ -185,6 +186,81 @@ def test_reboot_snapshot_reaches_backend_after_queued_presence(monkeypatch, tmp_
     assert heartbeat["esp"]["telemetry"]["slots"] == slots
     assert heartbeat["pending_presence_count"] == 0
     assert not any(service.gpio.outputs.values())
+
+
+@pytest.mark.parametrize("door,pin", [("pocket", 27), ("medium", 23)])
+def test_failed_presence_upload_does_not_starve_heartbeat_or_unlock(
+        monkeypatch, tmp_path: Path, hardware_caplog, door: str, pin: int):
+    device = str(uuid4())
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "real", "device_id": device,
+                "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {name: True for name in GPIOController.OUTPUTS},
+                "enable_actuators": True, "output_polarity_verified": True,
+                "telemetry_interval_seconds": 0.25, "telemetry_min_gap_seconds": 0.1}
+    service = HardwareService(config, settings)
+    service.gpio = GPIOController(simulation=True,
+                                  closed_level={"pocket": 0, "medium": 0},
+                                  active_high={name: True for name in GPIOController.OUTPUTS},
+                                  pulse_seconds=0.35, allow_outputs=True)
+    service.gpio.open()
+    service.gpio.set_simulated_door(door, 0)
+    service.gpio.doors[door].update(0, now=time.monotonic() + 0.1)
+    service._pending_presence["boot_1-1"] = {
+        "event_id": "boot_1-1", "boot_id": "boot_1", "seq": 1,
+        "slot": "P-01" if door == "pocket" else "M-01",
+        "kind": "SENSOR_SNAPSHOT", "present": False,
+    }
+    command_id = str(uuid4())
+    command = {"id": command_id, "device_id": device,
+               "action": f"pulse_{door}",
+               "expires_at": (datetime.now(UTC) + timedelta(seconds=5)).isoformat()}
+    presence_attempts = 0
+    heartbeat_counts = []
+    acknowledgments = []
+
+    def fake_request(_origin, path, payload, _credential):
+        nonlocal presence_attempts
+        if path == "/api/hardware/presence":
+            presence_attempts += 1
+            if presence_attempts == 1:
+                raise DeviceApiError("private-provider-response-never-log", status_code=503)
+            return {"ok": True}
+        if path == "/api/hardware/heartbeat":
+            pending = payload["snapshot"]["pending_presence_count"]
+            heartbeat_counts.append(pending)
+            return {"commands": [command] if pending == 0 and len(heartbeat_counts) == 2
+                    else [], "guidance": {}}
+        assert path == "/api/hardware/ack"
+        acknowledgments.append(payload.copy())
+        return {"ok": True}
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", fake_request)
+
+    async def exercise():
+        publisher = asyncio.create_task(service._publish_loop())
+        try:
+            async with asyncio.timeout(3):
+                while not acknowledgments:
+                    await asyncio.sleep(0.01)
+        finally:
+            publisher.cancel()
+            await asyncio.gather(publisher, return_exceptions=True)
+
+    asyncio.run(exercise())
+    service.gpio.close()
+    assert presence_attempts == 2
+    assert heartbeat_counts[:2] == [1, 0]
+    assert acknowledgments == [{"id": command_id, "status": "acked",
+                                "code": "pulse_completed"}]
+    assert not any(service.gpio.outputs.values())
+    assert service.snapshot()["last_unlock"]["status"] == "completed"
+    events = hardware_log_events(hardware_caplog)
+    assert [(event["gpio"], event["state"]) for event in events
+            if event["event"] == "solenoid_pulse"] == [
+                (pin, "activated"), (pin, "deactivated")]
+    assert "private-provider-response-never-log" not in hardware_caplog.text
 
 
 def test_reed_polarity_and_debounce():

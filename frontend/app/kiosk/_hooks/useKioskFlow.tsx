@@ -7,7 +7,7 @@ import { mediumCodes, pocketCodes, type StorageSize } from "@/libs/storage/slots
 import type { Compartment } from "../_types/kiosk";
 import type { ImageKind } from "../_types/kiosk";
 import { initialKioskState, kioskReducer } from "./kioskReducer";
-import { isFinalizedPlacement, resolveUnlockStatus, type KioskUnlockStatus } from "./kioskUnlockStatus";
+import { isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus, type KioskUnlockStatus } from "./kioskUnlockStatus";
 
 const allowedImageTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
 let lightQueue: Promise<void> = Promise.resolve();
@@ -104,12 +104,12 @@ function useKioskFlow() {
         setUnlockStatus((current) => resolveUnlockStatus(current, workflow));
         if (assignment) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_PLACEMENT", slot: workflow.wrong_slots[0] });
-          else if (state.modal === "wrongPlacement") dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
+          else if (state.modal === "wrongPlacement" && isResolvedWarning(workflow)) dispatch({ type: "WRONG_PLACEMENT_REMOVED" });
           else if (isFinalizedPlacement(workflow)) dispatch({ type: "PLACEMENT_SUCCEEDED", assignment: { ...assignment, placement_status: "placed", slot_status: "occupied" } });
         } else if (retrieval) {
           if (workflow.wrong_slots.length) dispatch({ type: "WRONG_ITEM", slot: workflow.wrong_slots[0] });
-          else if (state.modal === "wrongItem") dispatch({ type: "WRONG_ITEM_RETURNED" });
-          else if (workflow.retrieval_status === "completed") dispatch({ type: "CORRECT_ITEM" });
+          else if (state.modal === "wrongItem" && isResolvedWarning(workflow)) dispatch({ type: "WRONG_ITEM_RETURNED" });
+          else if (isFinalizedRetrieval(workflow)) dispatch({ type: "CORRECT_ITEM" });
         }
       } catch { if (active) { setHardwareOnline(false); setHardwarePhase(null); setHardwareDoor("unknown"); setLastUnlock(null); setUnlockCommandStatus(null); } }
       finally { polling = false; }

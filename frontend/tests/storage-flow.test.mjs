@@ -4,7 +4,7 @@ import { pocketCodes, mediumCodes, slotCodes, slotTotals, isSlotCode } from "../
 import { initialKioskState, kioskReducer } from "../app/kiosk/_hooks/kioskReducer.ts";
 import { initialClaimantState, claimantReducer } from "../libs/claimant/claimantReducer.ts";
 import { isAllowedKioskAction } from "../libs/api/kiosk-actions.ts";
-import { isFinalizedPlacement, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+import { isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
 
 test("kiosk waits for a completed backend placement before showing success", () => {
   const workflow = { placement_status: "reserved", phase: "provisional_success", wrong_slots: [] };
@@ -13,6 +13,19 @@ test("kiosk waits for a completed backend placement before showing success", () 
   assert.equal(isFinalizedPlacement({ ...workflow, placement_status: "placed" }), false);
   assert.equal(isFinalizedPlacement({ ...workflow, placement_status: "placed", phase: "completed", wrong_slots: ["P-02"] }), false);
   assert.equal(isFinalizedPlacement({ ...workflow, placement_status: "placed", phase: "completed" }), true);
+});
+
+test("retrieval remains provisional and warnings require backend resolution", () => {
+  const workflow = { retrieval_status: "pending", phase: "awaiting_door_close", wrong_slots: [] };
+  assert.equal(isFinalizedRetrieval(workflow), false);
+  assert.equal(isFinalizedRetrieval({ ...workflow, retrieval_status: "completed" }), false);
+  assert.equal(isFinalizedRetrieval({ ...workflow, retrieval_status: "completed", phase: "completed", wrong_slots: ["P-02"] }), false);
+  assert.equal(isFinalizedRetrieval({ ...workflow, retrieval_status: "completed", phase: "completed" }), true);
+  assert.equal(isResolvedWarning({ ...workflow, phase: "warning_active" }), false);
+  assert.equal(isResolvedWarning({ ...workflow, phase: "requires_review" }), false);
+  assert.equal(isResolvedWarning({ ...workflow, phase: null }), false);
+  assert.equal(isResolvedWarning({ ...workflow, wrong_slots: ["P-02"] }), false);
+  assert.equal(isResolvedWarning(workflow), true);
 });
 
 test("kiosk observes a committed unlock and does not show a failed command as waiting", () => {

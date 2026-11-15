@@ -71,8 +71,7 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
             assert data["pending_presence_count"] == 2
 
         async def claim_hardware_commands(self, incoming):
-            assert incoming == device
-            return []
+            raise AssertionError("A heartbeat with pending presence must not claim commands")
 
         async def hardware_guidance(self, incoming):
             assert incoming == device
@@ -168,6 +167,44 @@ def test_guidance_outage_does_not_claim_an_unlock_command():
         response = client.post("/api/hardware/heartbeat", json={"snapshot": snapshot()})
     assert response.status_code == 503
     assert calls == ["reconcile", "guidance"]
+
+
+def test_heartbeat_claims_queued_command_after_transient_503():
+    device = {"id": str(uuid4()), "unit_id": str(uuid4())}
+    command_id = str(uuid4())
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False))
+    app.dependency_overrides[get_device] = lambda: device
+    calls = []
+
+    class Kiosks:
+        async def hardware_heartbeat(self, incoming, data):
+            assert incoming == device
+            assert data["pending_presence_count"] == 0
+            calls.append("reconcile")
+            if calls.count("reconcile") == 1:
+                raise ServiceError("SUPABASE_UNAVAILABLE", "Hardware service is unavailable.", 503)
+
+        async def hardware_guidance(self, incoming):
+            assert incoming == device
+            calls.append("guidance")
+            return {"modes": {}, "buzzer": False}
+
+        async def claim_hardware_commands(self, incoming):
+            assert incoming == device
+            calls.append("claim")
+            return [{"id": command_id, "action": "pulse_pocket"}]
+
+    app.state.kiosks = Kiosks()
+    data = snapshot()
+    data["pending_presence_count"] = 0
+    with TestClient(app) as client:
+        first = client.post("/api/hardware/heartbeat", json={"snapshot": data})
+        second = client.post("/api/hardware/heartbeat", json={"snapshot": data})
+    assert first.status_code == 503
+    assert second.status_code == 200
+    assert second.json()["commands"] == [{"id": command_id, "action": "pulse_pocket"}]
+    assert calls == ["reconcile", "reconcile", "guidance", "claim"]
 
 
 def test_hardware_guidance_retries_read_error_without_replaying_commands(monkeypatch):

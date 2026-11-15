@@ -151,7 +151,10 @@ async def heartbeat(request: Request, payload: Heartbeat, device: Device):
     guidance = await request.app.state.kiosks.hardware_guidance(device)
     # Claim is a state-changing RPC. Keep it last: if guidance fails, the Pi
     # must not lose a claimed command in a 503 response.
-    commands = await request.app.state.kiosks.claim_hardware_commands(device)
+    # A failed presence upload must not block heartbeat, but a command cannot
+    # be claimed until those sensor transitions are reconciled in the database.
+    commands = (await request.app.state.kiosks.claim_hardware_commands(device)
+                if payload.snapshot.pending_presence_count == 0 else [])
     return {"device_id": device["id"], "commands": commands, "guidance": guidance}
 
 

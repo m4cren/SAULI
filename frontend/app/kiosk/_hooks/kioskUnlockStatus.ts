@@ -8,6 +8,19 @@ export function isFinalizedPlacement(workflow: HardwareWorkflow): boolean {
     && workflow.wrong_slots.length === 0;
 }
 
+export function isFinalizedRetrieval(workflow: HardwareWorkflow): boolean {
+  return workflow.retrieval_status === "completed"
+    && workflow.phase === "completed"
+    && workflow.wrong_slots.length === 0;
+}
+
+export function isResolvedWarning(workflow: HardwareWorkflow): boolean {
+  return workflow.wrong_slots.length === 0
+    && workflow.phase !== null
+    && workflow.phase !== "warning_active"
+    && workflow.phase !== "requires_review";
+}
+
 export function resolveUnlockStatus(
   current: KioskUnlockStatus,
   workflow: HardwareWorkflow,
