@@ -851,3 +851,7 @@ def test_guidance_clears_lights_and_buzzer_on_invalid_or_lost_backend(tmp_path: 
         assert sent[-1]["modes"]["P-02"] == "OFF"
 
     asyncio.run(exercise())
+
+
+def test_identify_frame_is_supported_for_repeatable_esp_boot_handshake():
+    assert encode_frame({"v": 1, "type": "identify"}) == b'{"v":1,"type":"identify"}\n'

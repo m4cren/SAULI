@@ -26,6 +26,8 @@ function useKioskFlow() {
   const [unlockCommandStatus, setUnlockCommandStatus] = useState<HardwareWorkflow["unlock_command_status"]>(null);
   const [unlockStatus, setUnlockStatus] = useState<KioskUnlockStatus>(null);
   const [hardwareError, setHardwareError] = useState<string | null>(null);
+  // Do not overwrite the actual unlock POST error with a periodic GET poll.
+  const [unlockError, setUnlockError] = useState<string | null>(null);
   const [assignedPresent, setAssignedPresent] = useState<boolean | null>(null);
   const [expectedPresent, setExpectedPresent] = useState<boolean | null>(null);
   const [localPhase, setLocalPhase] = useState<HardwareWorkflow["local_phase"]>(null);
@@ -176,6 +178,7 @@ function useKioskFlow() {
     (Object.keys(objectUrls.current) as ImageKind[]).forEach(clearImage);
     setAvailability({});
     setAvailabilityError(false);
+    setUnlockError(null);
     files.current = { front: null, back: null };
     qrFile.current = null;
     confirmationKey.current = null;
@@ -276,7 +279,7 @@ function useKioskFlow() {
         }
       }
       setUnlockStatus(unlock);
-      setHardwareError(unlockError);
+      setUnlockError(unlockError);
       dispatch({ type: "FOUND_CONFIRMED", assignment: {
         ...assigned, unlock_status: unlock, unlock_grant: unlockGrant,
       } });
@@ -328,7 +331,7 @@ function useKioskFlow() {
         }
       }
       setUnlockStatus(unlock);
-      setHardwareError(unlockError);
+      setUnlockError(unlockError);
       dispatch({ type: "QR_VALID", retrieval: {
         ...retrieval, unlock_status: unlock, unlock_grant: unlockGrant,
       } });
@@ -359,11 +362,14 @@ function useKioskFlow() {
   }
 
   async function retryUnlock() {
-    if (busy || unlockStatus !== "unavailable" || unlockCommandStatus === "failed" || lastUnlock?.status === "failed" || lastUnlock?.status === "rejected") return;
+    // An explicit Retry click must not silently return because of a stale GET.
+    // The backend/Pi still enforce authorization, replay and door interlocks.
+    if (busy || unlockStatus !== "unavailable") return;
     const assignment = state.screen.mode === "found" ? state.assignment : null;
     const retrieval = state.screen.mode === "retrieve" ? state.validatedRetrieval : null;
     if (!assignment && !retrieval) return;
     setBusy(true);
+    setUnlockError(null);
     try {
       const result = assignment
         ? await requestFoundUnlock(assignment.item_id,
@@ -373,14 +379,19 @@ function useKioskFlow() {
       if (["pending", "claimed", "acked"].includes(result.status)) {
         setUnlockStatus("queued");
         setUnlockGrantInvalid(false);
-        setHardwareError(null);
+        setUnlockError(null);
+        dispatch({ type: "SET_ERROR", message: null });
+      } else {
+        setUnlockError(`Unlock was not acknowledged (${result.status}).`);
       }
     } catch (cause) {
       if (cause instanceof SauliApiError && ["UNLOCK_GRANT_EXPIRED", "UNLOCK_GRANT_REPLAYED"].includes(cause.code ?? "")) {
         setUnlockGrantInvalid(true);
       }
-      dispatch({ type: "SET_ERROR", message: cause instanceof Error ? cause.message : "The door could not be requested. Please ask staff for help." });
-      setHardwareError(cause instanceof Error ? cause.message : "The door could not be requested. Please ask staff for help.");
+      const reason = cause instanceof Error ? cause.message : "The door could not be requested. Please ask staff for help.";
+      setUnlockError(cause instanceof SauliApiError && cause.code
+        ? `${reason} (${cause.code})` : reason);
+      dispatch({ type: "SET_ERROR", message: null });
     } finally { setBusy(false); }
   }
 
@@ -420,7 +431,7 @@ function useKioskFlow() {
   }
 
   return {
-    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, hardwareDoor, hardwareError, assignedPresent, expectedPresent, localPhase, locallyCompleted, syncPending, lastUnlock, unlockCommandStatus, unlockStatus, busy, analysis,
+    state, slots, availableCount, availability, availabilityError, hardwareOnline, hardwarePhase, hardwareDoor, hardwareError, unlockError, assignedPresent, expectedPresent, localPhase, locallyCompleted, syncPending, lastUnlock, unlockCommandStatus, unlockStatus, busy, analysis,
     setCaptureLightFault: setLightFault,
     selectFile, reset, retakePhotos, retakeSide, identify, confirmFound, saveReview, validateQr, validatePayload, tryAnotherQr, retryUnlock,
     startFound: () => dispatch({ type: "START_FOUND" }),

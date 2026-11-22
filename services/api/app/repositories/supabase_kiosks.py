@@ -465,7 +465,14 @@ class SupabaseKioskRepository:
                             "activated_at": reported.get("activated_at"),
                             "deactivated_at": reported.get("deactivated_at"),
                         } if reported else None),
-                        "unlock_command_status": "acked",
+                        # Only an authenticated Pi acknowledgment proves delivery.
+                        "unlock_command_status": (
+                            "acked" if reported.get("command_id") == warning.get("command_id")
+                            and reported.get("activated_at")
+                            and reported.get("status") in {"accepted", "completed"}
+                            else "failed" if reported.get("command_id") == warning.get("command_id")
+                            and reported.get("status") in {"failed", "rejected"}
+                            else None),
                         "unlock_retry_available": False,
                         "assigned_slot": warning.get("assigned_slot"),
                         "assigned_present": warning.get("assigned_present"),
@@ -545,8 +552,6 @@ class SupabaseKioskRepository:
                                        "deactivated_at": reported.get("deactivated_at")}
                     if age <= 5 and transaction.get("last_door") in ("open", "closed"):
                         observed_door = transaction["last_door"]
-            if direct and transaction and transaction.get("command_id"):
-                unlock_command_status = "acked"
             return {"placement_status": item["placement_status"] if item else None,
                     "retrieval_status": session["status"] if session else None,
                     "wrong_slots": [codes.get(row["slot_id"], "unknown") for row in incidents],
@@ -572,11 +577,19 @@ class SupabaseKioskRepository:
                 state = await self.hardware.state(device["id"])
                 result["hardware_online"] = bool(state)
                 reported = state.get("last_unlock") or {}
+                command_matches = bool(result.get("_command_id")
+                    and reported.get("command_id") == result["_command_id"])
                 result["last_unlock"] = ({
                     "status": reported.get("status"),
                     "activated_at": reported.get("activated_at"),
                     "deactivated_at": reported.get("deactivated_at"),
-                } if reported else None)
+                } if command_matches else None)
+                if command_matches and reported.get("activated_at") and reported.get("status") in {"accepted", "completed"}:
+                    result["unlock_command_status"] = "acked"
+                elif command_matches and reported.get("status") in {"failed", "rejected"}:
+                    result["unlock_command_status"] = "failed"
+                else:
+                    result["unlock_command_status"] = None
                 workflow = state.get("door_workflow") or {}
                 door = workflow.get("door")
                 if door in {"pocket", "medium"}:

@@ -113,6 +113,13 @@ class LocalWarningState(BaseModel):
     assigned_slot: str | None = Field(
         default=None, pattern=r"^(P-0[1-8]|M-0[1-4])$")
     operation: Literal["deposit", "retrieval"] | None = None
+    # Direct Pi workflow metadata must survive validation before reconciliation.
+    workflow_id: UUID | None = None
+    local_phase: Literal["idle", "authorized", "unlocked", "door_open",
+                         "item_verified", "door_closed", "locally_completed",
+                         "synced", "fault"] = "idle"
+    locally_completed: bool = False
+    sync_pending: bool = False
     provisional_success: bool = False
     assigned_present: bool | None = None
     expected_present: bool | None = None
@@ -137,6 +144,8 @@ class HardwareSnapshot(BaseModel):
     last_unlock: LastUnlockState | None = None
     pending_presence_count: int | None = Field(default=None, ge=0, le=128)
     local_warning: LocalWarningState = Field(default_factory=LocalWarningState)
+    # Preserve Pi-verified post-close evidence for the local completion RPC.
+    local_completion: dict[str, object] | None = None
     local_incident_updates: list[LocalIncidentUpdate] = Field(
         default_factory=list, max_length=24)
 
@@ -230,6 +239,8 @@ async def workflow_event(request: Request, payload: WorkflowEvent, device: Devic
     if result.get("error"):
         raise ServiceError("HARDWARE_EVENT_REJECTED",
                            "The workflow event could not be reconciled.", 422)
+    if request.app.state.settings.hardware_transport == "direct":
+        return result
     guidance = await request.app.state.kiosks.hardware_guidance(device)
     return {**result, "guidance": guidance}
 

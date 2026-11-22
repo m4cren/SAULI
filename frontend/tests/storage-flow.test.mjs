@@ -76,6 +76,14 @@ test("kiosk observes a committed unlock and does not show a failed command as wa
   assert.equal(resolveUnlockStatus("queued", { ...waiting, unlock_retry_available: true }), "unavailable");
 });
 
+test("an old unconfirmed command must not be presented as a successful unlock", () => {
+  const unconfirmed = { phase: "awaiting_door_open", unlock_command_status: null,
+    unlock_retry_available: false, last_unlock: null };
+  assert.equal(resolveUnlockStatus("unavailable", unconfirmed), "unavailable");
+  assert.equal(resolveUnlockStatus("queued", { ...unconfirmed,
+    unlock_command_status: "failed" }), "unavailable");
+});
+
 test("kiosk proxy permits both guarded unlock requests and rejects unrelated actions", () => {
   const id = "a74c1c56-650a-407e-b946-f2c25482093c";
   assert.equal(isAllowedKioskAction(`found-items/${id}/request-unlock`), true);

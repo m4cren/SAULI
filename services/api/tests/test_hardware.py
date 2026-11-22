@@ -34,6 +34,21 @@ def snapshot():
         "esp": {"connection": "offline", "telemetry": None}}
 
 
+def test_direct_local_workflow_fields_validate_and_preserve_completion():
+    row = snapshot()
+    row["local_warning"] = {
+        "monitoring": True, "workflow_id": str(uuid4()),
+        "local_phase": "locally_completed", "locally_completed": True,
+        "sync_pending": True,
+    }
+    row["local_completion"] = {"verified": True, "command_id": str(uuid4())}
+    parsed = HardwareSnapshot.model_validate(row).model_dump(mode="json")
+    assert parsed["local_warning"]["sync_pending"] is True
+    assert parsed["local_warning"]["locally_completed"] is True
+    assert parsed["local_warning"]["workflow_id"] == row["local_warning"]["workflow_id"]
+    assert parsed["local_completion"] == row["local_completion"]
+
+
 def test_legacy_heartbeat_preserves_unknown_pending_queue():
     assert HardwareSnapshot.model_validate(snapshot()).pending_presence_count is None
     assert HardwareSnapshot.model_validate({
