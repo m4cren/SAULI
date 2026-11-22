@@ -2,17 +2,21 @@
 
 import argparse
 import asyncio
+import hmac
 import json
 import logging
+import os
 import re
 import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 from sauli_pi.communication.backend_client import DeviceApiError, request_json
 from sauli_pi.communication.esp32_serial import EspLink
 from sauli_pi.config import Config, read_credential
@@ -22,6 +26,23 @@ from sauli_pi.workflows.door import DoorWorkflow
 LOG = logging.getLogger("sauli.hardware")
 PRESENCE_SLOTS = {f"P-{number:02d}" for number in range(1, 9)} | {
     f"M-{number:02d}" for number in range(1, 5)}
+
+
+class ExpectedSlot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    present: bool
+
+
+class DirectCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: UUID
+    device_id: UUID
+    action: Literal["pulse_pocket", "pulse_medium", "capture_light_on", "capture_light_off"]
+    expires_at: datetime
+    transport: Literal["direct"]
+    assigned_slot: str | None = Field(default=None, pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    expected_slots: list[ExpectedSlot] | None = Field(default=None, max_length=12)
 
 
 def configure_logging() -> None:
@@ -60,6 +81,9 @@ def load_hardware(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("mode") not in ("real", "simulation"):
         raise ValueError("Hardware mode must be explicitly real or simulation")
+    value["command_transport"] = value.get("command_transport", "direct")
+    if value["command_transport"] not in {"direct", "legacy"}:
+        raise ValueError("command_transport must be direct or legacy")
     if value.get("enable_actuators") and not value.get("output_polarity_verified"):
         raise ValueError("Verify output polarity before enabling actuators")
     test_channel = value.get("solenoid_led_test_channel")
@@ -85,6 +109,15 @@ def load_hardware(path: Path) -> dict:
             value["device_id"] = str(UUID(value["device_id"]))
         except (KeyError, ValueError, TypeError) as exc:
             raise ValueError("Real hardware requires the enrolled device UUID") from exc
+        if value["command_transport"] == "direct":
+            token = value.get("direct_api_token")
+            if not isinstance(token, str) or len(token) < 32:
+                raise ValueError("Direct hardware transport requires a 32+ character API token")
+            value.setdefault("direct_bind_host", "127.0.0.1")
+            value.setdefault("direct_port", 8765)
+            value.setdefault("direct_replay_file", "/var/lib/sauli/hardware-command-replay.json")
+            value.setdefault("direct_incident_queue_file",
+                             "/var/lib/sauli/hardware-incident-queue.json")
     return value
 
 
@@ -104,19 +137,42 @@ class HardwareService:
         self.events: list[dict] = []
         self._seen: set[str] = set()
         self._recent_commands: deque[str] = deque(maxlen=256)
+        self._command_lock = asyncio.Lock()
+        replay_name = settings.get("direct_replay_file")
+        self._replay_file = Path(replay_name) if replay_name else None
+        self._command_results: dict[str, dict] = {}
+        self._load_replay_results()
         self.credential: str | None = None
         self.ready = False
         self.fault: str | None = None
         self._ping_seq = 0
         self._last_door_states: dict[str, str] = {}
         self._last_raw_levels: dict[str, int | None] = {}
+        self._door_state_dirty = True
+        self._last_door_state_sent = 0.0
         self._sequence = 0
         self._observed_at: str | None = None
         self._publish_signal = asyncio.Event()
         self._pending_acks: deque[dict] = deque()
         self._pending_presence: dict[str, dict] = {}
+        self._direct_events: deque[dict] = deque(maxlen=128)
+        self._security_events: deque[dict] = deque(maxlen=64)
+        self._direct_event_signal = asyncio.Event()
+        self._completion_snapshot_pending = False
+        self._boot_recovery_snapshot_pending = (
+            settings.get("command_transport", "legacy") == "direct")
         self._presence_upload_failed = False
         self._last_unlock: dict | None = None
+        incident_name = settings.get("direct_incident_queue_file")
+        self._incident_queue_file = Path(incident_name) if incident_name else None
+        self._local_operation: dict | None = None
+        self._local_present: dict[str, bool] = {}
+        self._local_violations: dict[str, str] = {}
+        self._local_provisional_ever = False
+        self._local_provisional = False
+        self._load_security_events()
+        self._backend_guidance: dict[str, str] | None = None
+        self._backend_buzzer = False
         self._last_guidance: dict | None = None
         self._last_guidance_sent = 0.0
         self._last_esp_connection = False
@@ -133,6 +189,260 @@ class HardwareService:
             close_timeout_seconds=float(settings.get("door_close_timeout_seconds", 30)))
         self.task: asyncio.Task | None = None
 
+    @property
+    def direct_mode(self) -> bool:
+        return self.settings.get("command_transport", "legacy") == "direct"
+
+    def _load_replay_results(self) -> None:
+        if self._replay_file is None:
+            return
+        try:
+            value = json.loads(self._replay_file.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                return
+            for command_id, result in list(value.items())[-256:]:
+                UUID(command_id)
+                if isinstance(result, dict) and result.get("id") == command_id:
+                    self._command_results[command_id] = result
+        except (OSError, ValueError, TypeError):
+            # A missing or invalid cache fails closed only for commands that the
+            # current process has seen; command expiry remains the outer bound.
+            self._command_results = {}
+
+    def _save_replay_results(self) -> bool:
+        if self._replay_file is None:
+            return True
+        try:
+            self._replay_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            pending = self._replay_file.with_suffix(self._replay_file.suffix + ".pending")
+            pending.write_text(json.dumps(self._command_results, separators=(",", ":")),
+                               encoding="utf-8")
+            os.chmod(pending, 0o600)
+            os.replace(pending, self._replay_file)
+            return True
+        except OSError:
+            LOG.exception("Could not persist direct-command replay cache")
+            return False
+
+    def _load_security_events(self) -> None:
+        if self._incident_queue_file is None:
+            return
+        try:
+            rows = json.loads(self._incident_queue_file.read_text(encoding="utf-8"))
+            if isinstance(rows, list):
+                for row in rows[-64:]:
+                    if isinstance(row, dict) and isinstance(row.get("snapshot"), dict):
+                        self._security_events.append(row)
+                if self._security_events:
+                    self._direct_event_signal.set()
+        except (OSError, ValueError, TypeError):
+            self._security_events.clear()
+
+    def _save_security_events(self) -> bool:
+        if self._incident_queue_file is None:
+            return True
+        try:
+            self._incident_queue_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            pending = self._incident_queue_file.with_suffix(
+                self._incident_queue_file.suffix + ".pending")
+            pending.write_text(json.dumps(list(self._security_events),
+                                          separators=(",", ":")), encoding="utf-8")
+            os.chmod(pending, 0o600)
+            os.replace(pending, self._incident_queue_file)
+            return True
+        except OSError:
+            LOG.exception("Could not persist direct security-event queue")
+            return False
+
+    async def execute_direct_command(self, row: dict) -> dict:
+        command_id = str(row.get("id", ""))
+        async with self._command_lock:
+            cached = self._command_results.get(command_id)
+            if cached is not None:
+                log_event("command_replayed", command_id=command_id,
+                          status=cached.get("status"))
+                return cached.copy()
+            # Persist a fail-closed reservation before touching an output. A
+            # process/power loss during the pulse can then never replay it.
+            reservation = {"id": command_id, "status": "failed",
+                           "code": "replay_state_unknown"}
+            self._command_results[command_id] = reservation
+            if not self._save_replay_results():
+                result = {"id": command_id, "status": "failed",
+                          "code": "replay_storage_unavailable"}
+                self._command_results[command_id] = result
+                return result
+            result = await self.handle_command(row)
+            self._command_results[command_id] = result.copy()
+            while len(self._command_results) > 256:
+                self._command_results.pop(next(iter(self._command_results)))
+            self._save_replay_results()
+            return result
+
+    def _validate_direct_unlock(self, row: dict, door: str) -> None:
+        if not self.ready:
+            raise ValueError("hardware_not_ready")
+        expected_rows = row.get("expected_slots")
+        assigned_slot = row.get("assigned_slot")
+        if (not isinstance(assigned_slot, str)
+                or (door == "pocket" and not assigned_slot.startswith("P-"))
+                or (door == "medium" and not assigned_slot.startswith("M-"))):
+            raise ValueError("hardware_not_ready")
+        if not isinstance(expected_rows, list) or len(expected_rows) != 12:
+            raise ValueError("hardware_not_ready")
+        expected = {entry.get("code"): entry.get("present") for entry in expected_rows
+                    if isinstance(entry, dict)}
+        if set(expected) != PRESENCE_SLOTS or any(type(value) is not bool
+                                                   for value in expected.values()):
+            raise ValueError("hardware_not_ready")
+        esp = self.esp.snapshot()
+        telemetry = esp.get("telemetry") or {}
+        readings = telemetry.get("slots")
+        try:
+            observed_at = datetime.fromisoformat(
+                str(esp["telemetry_at"]).replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("hardware_not_ready") from None
+        if (esp.get("connection") != "online" or not esp.get("boot_id")
+                or abs((datetime.now(UTC) - observed_at).total_seconds()) > 5
+                or not isinstance(readings, list) or len(readings) != 12):
+            raise ValueError("hardware_not_ready")
+        observed = {entry.get("code"): entry for entry in readings if isinstance(entry, dict)}
+        if set(observed) != PRESENCE_SLOTS:
+            raise ValueError("hardware_not_ready")
+        for code, entry in observed.items():
+            if (entry.get("ready") is not True or entry.get("fault") not in {None, ""}
+                    or type(entry.get("present")) is not bool):
+                raise ValueError("hardware_not_ready")
+            if entry["present"] is not expected[code]:
+                raise ValueError("sensor_state_mismatch")
+        door_state = self.gpio.doors[door].snapshot()
+        if door_state["door"] != "closed" or door_state["raw_level"] is None:
+            raise ValueError("door_not_closed")
+        if self.gpio.outputs[f"{door}_solenoid"]:
+            raise ValueError("hardware_not_ready")
+        if self.door_workflow.phase not in {"idle", "completed"}:
+            raise ValueError("door_workflow_busy")
+
+    def _start_local_operation(self, row: dict) -> None:
+        expected = {entry["code"]: entry["present"] for entry in row["expected_slots"]}
+        assigned = row["assigned_slot"]
+        initial_present = expected[assigned]
+        self._local_operation = {
+            "command_id": str(row["id"]),
+            "assigned_slot": assigned,
+            "kind": "retrieval" if initial_present else "deposit",
+            "expected": expected,
+            "target_present": not initial_present,
+        }
+        self._local_present = expected.copy()
+        self._local_violations = {}
+        self._local_provisional_ever = False
+        self._local_provisional = False
+        self._changed()
+
+    def _local_warning_snapshot(self) -> dict:
+        operation = self._local_operation
+        return {
+            "monitoring": operation is not None,
+            "active": bool(self._local_violations),
+            "command_id": operation["command_id"] if operation else None,
+            "assigned_slot": operation["assigned_slot"] if operation else None,
+            "operation": operation["kind"] if operation else None,
+            "provisional_success": self._local_provisional,
+            "violations": [
+                {"slot": slot, "kind": kind}
+                for slot, kind in sorted(self._local_violations.items())
+            ],
+        }
+
+    def _queue_security_updates(self, updates: list[dict]) -> None:
+        if not updates:
+            return
+        snapshot = self._direct_event_snapshot()
+        snapshot["local_incident_updates"] = updates
+        if len(self._security_events) == self._security_events.maxlen:
+            # Never silently discard a durable correction/violation transition.
+            self.fault = "security_event_queue_full"
+            LOG.error("Direct security-event queue is full")
+            return
+        self._security_events.append({"presence": None, "snapshot": snapshot})
+        self._save_security_events()
+        self._direct_event_signal.set()
+
+    def _recompute_local_security(self) -> bool:
+        operation = self._local_operation
+        if operation is None:
+            return False
+        previous = self._local_violations
+        current: dict[str, str] = {}
+        assigned = operation["assigned_slot"]
+        target = operation["target_present"]
+        assigned_present = self._local_present.get(assigned)
+        if assigned_present is target:
+            self._local_provisional = True
+            self._local_provisional_ever = True
+        else:
+            self._local_provisional = False
+            if self._local_provisional_ever and assigned_present is not None:
+                current[assigned] = (
+                    "wrong_removal" if operation["kind"] == "deposit"
+                    else "wrong_placement")
+        for slot, expected in operation["expected"].items():
+            if slot == assigned or slot not in self._local_present:
+                continue
+            present = self._local_present[slot]
+            if present != expected:
+                current[slot] = "wrong_placement" if present else "wrong_removal"
+        updates = [
+            {"slot": slot, "kind": kind, "active": False}
+            for slot, kind in previous.items()
+            if current.get(slot) != kind
+        ]
+        updates.extend(
+            {"slot": slot, "kind": kind, "active": True}
+            for slot, kind in current.items()
+            if previous.get(slot) != kind
+        )
+        changed = current != previous
+        self._local_violations = current
+        if changed:
+            self._changed()
+            self._queue_security_updates(updates)
+        return changed
+
+    async def _observe_local_presence(self, slot: str, present: bool) -> None:
+        if self._local_operation is None or slot not in self._local_operation["expected"]:
+            return
+        self._local_present[slot] = present
+        changed = self._recompute_local_security()
+        if changed:
+            await self._refresh_guidance()
+
+    async def _observe_local_telemetry(self, telemetry: dict) -> None:
+        if self._local_operation is None:
+            return
+        readings = telemetry.get("slots")
+        if not isinstance(readings, list):
+            return
+        for reading in readings:
+            if (isinstance(reading, dict) and reading.get("ready") is True
+                    and type(reading.get("present")) is bool
+                    and reading.get("code") in self._local_operation["expected"]):
+                self._local_present[reading["code"]] = reading["present"]
+        changed = self._recompute_local_security()
+        if changed:
+            await self._refresh_guidance()
+
+    async def _finish_local_operation(self) -> None:
+        self._local_operation = None
+        self._local_present = {}
+        self._local_violations = {}
+        self._local_provisional = False
+        self._local_provisional_ever = False
+        self._changed()
+        await self._refresh_guidance()
+
     def event(self, kind: str, command_id: str | None = None) -> None:
         if kind == "esp_disconnected" and self._esp_online:
             self._esp_online = False
@@ -141,6 +451,18 @@ class HardwareService:
         if command_id:
             entry["command_id"] = command_id
         self.events = ([entry] + self.events)[:64]
+        if self.direct_mode and kind in {
+            "workflow_door_opened", "workflow_door_closed",
+            "workflow_open_timeout", "workflow_close_timeout",
+        }:
+            # Freeze the event-time view. In particular, the close event must
+            # retain the pre-close telemetry sequence so a later ESP reading is
+            # provably newer when the backend finalizes the transaction.
+            self._direct_events.append({"presence": None,
+                                        "snapshot": self._direct_event_snapshot()})
+            self._direct_event_signal.set()
+            if kind == "workflow_door_closed":
+                self._completion_snapshot_pending = True
         self._changed()
 
     def _changed(self) -> None:
@@ -157,9 +479,14 @@ class HardwareService:
                 "esp": self.esp.snapshot() if self.settings["mode"] == "real" else
                 {"connection": "simulated", "telemetry": None},
                 "events": self.events[:64],
-                "pending_presence_count": len(self._pending_presence),
+                "pending_presence_count": 0 if self.direct_mode else len(self._pending_presence),
                 "last_unlock": self._last_unlock,
+                "local_warning": self._local_warning_snapshot(),
                 "door_workflow": self.door_workflow.snapshot()}
+
+    def _direct_event_snapshot(self) -> dict:
+        """Detach queued evidence from mutable ESP/event dictionaries."""
+        return json.loads(json.dumps(self.snapshot()))
 
     def record_door_changes(self) -> None:
         for name, door in self.gpio.doors.items():
@@ -170,6 +497,8 @@ class HardwareService:
                 self._changed()
             self._last_raw_levels[name] = raw
             previous = self._last_door_states.get(name)
+            if previous != state:
+                self._door_state_dirty = True
             if previous is not None and state != previous and state in {"open", "closed"}:
                 self.event(f"{name}_door_{state}")
                 log_event("reed_transition", door=name, gpio=GPIOController.INPUTS[name],
@@ -180,6 +509,16 @@ class HardwareService:
             transition = self.door_workflow.observe(observed)
             if transition:
                 self.event(transition, self.door_workflow.command_id)
+
+    async def _send_door_states(self) -> None:
+        doors = {name: self.gpio.doors[name].snapshot()["door"]
+                 for name in ("pocket", "medium")}
+        await self.esp.send({
+            "v": 1, "type": "command", "id": str(uuid4()),
+            "action": "set_door_states", "doors": doors,
+        })
+        self._door_state_dirty = False
+        self._last_door_state_sent = time.monotonic()
 
     async def handle_command(self, row: dict) -> dict:
         command_id = str(row.get("id", ""))
@@ -221,6 +560,8 @@ class HardwareService:
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
+            if row.get("transport") == "direct":
+                self._validate_direct_unlock(row, door)
             self._last_unlock = {
                 "command_id": command_id, "target_group": door,
                 "status": "received", "accepted_at": None,
@@ -232,6 +573,8 @@ class HardwareService:
                 raise ValueError("test_channel_not_allowed")
             self.door_workflow.start(
                 command_id, door, self.gpio.doors[door].snapshot()["door"])
+            if row.get("transport") == "direct":
+                self._start_local_operation(row)
             self._last_unlock["status"] = "accepted"
             self._last_unlock["accepted_at"] = datetime.now(UTC).isoformat()
             self.event("command_accepted", command_id)
@@ -263,7 +606,8 @@ class HardwareService:
             if code not in {"expired", "device_mismatch", "simulation_mode",
                             "actuators_disabled", "outputs_unverified", "unsupported_action",
                             "test_channel_not_allowed",
-                            "door_workflow_busy", "door_not_closed"}:
+                            "door_workflow_busy", "door_not_closed", "hardware_not_ready",
+                            "sensor_state_mismatch"}:
                 code = "invalid_command"
             log_event("command_failed", command_id=command_id, code=code)
             return {"id": command_id, "status": "failed", "code": code}
@@ -275,6 +619,11 @@ class HardwareService:
                 self._last_unlock["last_output_error"] = "hardware_failure"
             if self.door_workflow.command_id == command_id:
                 self.door_workflow.fail("hardware_failure")
+            if (self._local_operation is not None
+                    and self._local_operation["command_id"] == command_id):
+                self._local_operation = None
+                self._local_present = {}
+                self._local_violations = {}
             self.event("command_failed", command_id)
             return {"id": command_id, "status": "failed", "code": "hardware_failure"}
 
@@ -318,6 +667,9 @@ class HardwareService:
             for message in messages:
                 if message["type"] == "hello":
                     self.event("esp_hello")
+                    self._door_state_dirty = True
+                    if self.direct_mode:
+                        self._boot_recovery_snapshot_pending = True
                     if not self._esp_online:
                         self._esp_online = True
                         log_event("esp_connection", state="connected", port=self.esp.port)
@@ -330,6 +682,18 @@ class HardwareService:
                     event = {key: message.get(key) for key in
                              ("event_id", "boot_id", "seq", "slot", "kind", "present")}
                     if valid_presence_event(event):
+                        if self.direct_mode:
+                            await self._observe_local_presence(
+                                event["slot"], event["present"])
+                            # The local monitor has already consumed the event.
+                            # Only genuine incident transitions enter the durable
+                            # backend queue; routine sensor changes stay local.
+                            try:
+                                await self.esp.send({"v": 1, "type": "event_ack",
+                                                     "event_id": event["event_id"]})
+                            except ConnectionError:
+                                self.event("esp_disconnected")
+                            continue
                         if len(self._pending_presence) < 128 or event["event_id"] in self._pending_presence:
                             self._pending_presence[event["event_id"]] = event
                             self._publish_signal.set()
@@ -356,12 +720,31 @@ class HardwareService:
                                 self.event("esp_disconnected")
                 else:
                     self._changed()
+                    if self.direct_mode and message["type"] == "telemetry":
+                        await self._observe_local_telemetry(message)
+                    if (self.direct_mode and message["type"] == "telemetry" and (
+                            self._completion_snapshot_pending
+                            or self._boot_recovery_snapshot_pending)):
+                        self._completion_snapshot_pending = False
+                        self._boot_recovery_snapshot_pending = False
+                        self._direct_events.append({
+                            "presence": None,
+                            "snapshot": self._direct_event_snapshot(),
+                        })
+                        self._direct_event_signal.set()
                 if message["type"] == "ping":
                     try:
                         await self.esp.send({"v": 1, "type": "pong", "seq": message.get("seq", 0),
                                              "uptime_ms": int(time.monotonic() * 1000)})
                     except ConnectionError:
                         self.event("esp_disconnected")
+            if self.esp.serial is not None and (
+                    self._door_state_dirty
+                    or time.monotonic() - self._last_door_state_sent >= 3):
+                try:
+                    await self._send_door_states()
+                except ConnectionError:
+                    self.event("esp_disconnected")
             if self.esp.serial is not None and time.monotonic() >= next_ping:
                 next_ping = time.monotonic() + 3
                 self._ping_seq += 1
@@ -376,6 +759,56 @@ class HardwareService:
                 self._changed()
             if not messages:
                 await asyncio.sleep(0.05)
+
+    async def _direct_event_loop(self) -> None:
+        """Publish only transaction/security transitions, never routine telemetry."""
+        backoff = 1.0
+        while True:
+            if not self._security_events and not self._direct_events:
+                await self._direct_event_signal.wait()
+                self._direct_event_signal.clear()
+                continue
+            security_event = bool(self._security_events)
+            queued = (self._security_events if security_event else self._direct_events)[0]
+            payload = {"snapshot": queued.get("snapshot") or self.snapshot(),
+                       "presence": queued.get("presence")}
+            try:
+                result = await asyncio.to_thread(
+                    request_json, self.config.backend_url, "/api/hardware/workflow-event",
+                    payload, self.credential,
+                )
+                await self._apply_guidance(result.get("guidance") or {})
+                if result.get("finalized") is True or result.get("phase") == "completed":
+                    await self._finish_local_operation()
+                if result.get("needs_fresh_snapshot"):
+                    self._completion_snapshot_pending = True
+                    if self.esp.serial is not None:
+                        try:
+                            await self.esp.send({"v": 1, "type": "snapshot"})
+                        except ConnectionError:
+                            pass
+                presence = queued.get("presence")
+                if presence and self.esp.serial is not None:
+                    try:
+                        await self.esp.send({"v": 1, "type": "event_ack",
+                                             "event_id": presence["event_id"]})
+                    except ConnectionError:
+                        pass
+                if security_event:
+                    self._security_events.popleft()
+                    self._save_security_events()
+                else:
+                    self._direct_events.popleft()
+                backoff = 1.0
+            except Exception:
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+
+    async def _local_guidance_loop(self) -> None:
+        """Refresh the ESP watchdog from cached guidance without a DB poll."""
+        while True:
+            await asyncio.sleep(1)
+            await self._refresh_guidance()
 
     async def _publish_loop(self) -> None:
         last_attempt = 0.0
@@ -520,31 +953,20 @@ class HardwareService:
             self._changed()
 
     async def _clear_guidance(self) -> None:
-        previous = self._last_guidance
-        self._last_guidance = None
-        self._last_guidance_sent = 0.0
-        self._last_esp_connection = False
-        if previous is not None and self.esp.serial is not None:
-            try:
-                await self.esp.send({"v": 1, "type": "command", "id": str(uuid4()),
-                                     "action": "set_all_lights",
-                                     "modes": {slot: "OFF" for slot in previous}})
-            except ConnectionError:
-                pass  # The ESP guidance watchdog also turns the outputs off.
+        self._backend_guidance = None
+        self._backend_buzzer = False
+        await self._refresh_guidance(force=True)
 
-    async def _apply_guidance(self, guidance: dict) -> None:
-        modes = guidance.get("modes")
-        expected_slots = {f"P-{number:02d}" for number in range(1, 9)}
-        expected_slots.update(f"M-{number:02d}" for number in range(1, 5))
-        if not isinstance(modes, dict) or set(modes) != expected_slots or any(
-                mode not in {"OFF", "STEADY_ON", "NORMAL_BLINK", "SOS_BLINK"}
-                for mode in modes.values()):
-            self._set_buzzer(False)
-            await self._clear_guidance()
-            return
-        self._set_buzzer(bool(guidance.get("buzzer")))
+    async def _refresh_guidance(self, *, force: bool = False) -> None:
+        slots = {f"P-{number:02d}" for number in range(1, 9)}
+        slots.update(f"M-{number:02d}" for number in range(1, 5))
+        modes = (self._backend_guidance.copy() if self._backend_guidance is not None
+                 else {slot: "OFF" for slot in slots})
+        for slot in self._local_violations:
+            modes[slot] = "SOS_BLINK"
+        self._set_buzzer(self._backend_buzzer or bool(self._local_violations))
         if self.esp.serial is not None and (
-                modes != self._last_guidance or not self._last_esp_connection or
+                force or modes != self._last_guidance or not self._last_esp_connection or
                 time.monotonic() - self._last_guidance_sent >= 5):
             try:
                 await self.esp.send({"v": 1, "type": "command", "id": str(uuid4()),
@@ -554,6 +976,19 @@ class HardwareService:
                 self._last_guidance_sent = time.monotonic()
             except ConnectionError:
                 self._last_esp_connection = False
+
+    async def _apply_guidance(self, guidance: dict) -> None:
+        modes = guidance.get("modes")
+        expected_slots = {f"P-{number:02d}" for number in range(1, 9)}
+        expected_slots.update(f"M-{number:02d}" for number in range(1, 5))
+        if not isinstance(modes, dict) or set(modes) != expected_slots or any(
+                mode not in {"OFF", "STEADY_ON", "NORMAL_BLINK", "SOS_BLINK"}
+                for mode in modes.values()):
+            await self._clear_guidance()
+            return
+        self._backend_guidance = modes.copy()
+        self._backend_buzzer = bool(guidance.get("buzzer"))
+        await self._refresh_guidance()
 
     async def run(self) -> None:
         if self.settings["mode"] == "real":
@@ -577,7 +1012,11 @@ class HardwareService:
                 tasks.create_task(self._sample_loop())
                 if self.settings["mode"] == "real":
                     tasks.create_task(self._esp_loop())
-                    tasks.create_task(self._publish_loop())
+                    if self.direct_mode:
+                        tasks.create_task(self._direct_event_loop())
+                        tasks.create_task(self._local_guidance_loop())
+                    else:
+                        tasks.create_task(self._publish_loop())
         except Exception:
             self.fault = "hardware_loop_failed"
             LOG.exception("Hardware monitoring stopped")
@@ -608,6 +1047,14 @@ def create_app(config: Config, settings: dict) -> FastAPI:
 
     app = FastAPI(title="SAULI Pi local hardware", lifespan=lifespan)
 
+    def authenticate_direct(authorization: str | None) -> None:
+        if not service.direct_mode:
+            raise HTTPException(status_code=404, detail="Direct transport is disabled")
+        expected = settings.get("direct_api_token", "")
+        supplied = authorization.removeprefix("Bearer ") if authorization else ""
+        if not expected or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(status_code=403, detail="Direct hardware authentication failed")
+
     @app.get("/health")
     def health():
         return {"ok": service.ready and service.task is not None and not service.task.done(),
@@ -616,6 +1063,18 @@ def create_app(config: Config, settings: dict) -> FastAPI:
     @app.get("/state")
     def state():
         return service.snapshot()
+
+    @app.get("/v1/state")
+    def direct_state(authorization: str | None = Header(default=None)):
+        authenticate_direct(authorization)
+        return service.snapshot()
+
+    @app.post("/v1/commands")
+    async def direct_command(command: DirectCommand,
+                             authorization: str | None = Header(default=None)):
+        authenticate_direct(authorization)
+        result = await service.execute_direct_command(command.model_dump(mode="json"))
+        return {**result, "snapshot": service.snapshot()}
 
     return app
 
@@ -627,8 +1086,10 @@ def main() -> None:
     parser.add_argument("--hardware", type=Path, default=Path("/etc/sauli/hardware.json"))
     args = parser.parse_args()
     import uvicorn
-    uvicorn.run(create_app(Config.load(args.config), load_hardware(args.hardware)),
-                host="127.0.0.1", port=8765, workers=1, reload=False)
+    settings = load_hardware(args.hardware)
+    uvicorn.run(create_app(Config.load(args.config), settings),
+                host=settings.get("direct_bind_host", "127.0.0.1"),
+                port=int(settings.get("direct_port", 8765)), workers=1, reload=False)
 
 
 if __name__ == "__main__":

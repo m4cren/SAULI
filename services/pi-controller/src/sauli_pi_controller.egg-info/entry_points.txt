@@ -1,0 +1,2 @@
+[console_scripts]
+sauli-pi = sauli_pi.main:main

@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <math.h>
+#include "lighting_policy.h"
 
 #ifndef SAULI_VERBOSE_DIAGNOSTICS
 #define SAULI_VERBOSE_DIAGNOSTICS 1
@@ -11,10 +12,10 @@
 constexpr uint8_t DATA_PIN = 1, CLOCK_PIN = 2, LATCH_PIN = 21, HX_CLOCK_PIN = 47;
 constexpr uint8_t UART_RX = 44, UART_TX = 43;
 constexpr uint32_t BAUD = 115200, TELEMETRY_MS = 1000, SENSOR_TIMEOUT_MS = 3000;
+constexpr uint32_t DOOR_STATE_TIMEOUT_MS = 7000;
 constexpr uint16_t MAX_LINE = 4096;
 constexpr float PRESENCE_ON_G = 30.0f, PRESENCE_OFF_G = 15.0f;
 constexpr uint8_t STABLE_SAMPLES = 3;
-constexpr int8_t LIGHT_BITS[12] = {0,1,2,3,4,5,6,7,9,10,11,12};
 constexpr uint32_t DEBOUNCE_MS = 60;
 constexpr uint32_t GUIDANCE_TIMEOUT_MS = 15000;
 #ifdef SAULI_SENSOR_MODE_HX711
@@ -22,7 +23,6 @@ constexpr bool SWITCH_MODE = false;
 #else
 constexpr bool SWITCH_MODE = true;
 #endif
-enum LightMode : uint8_t { OFF, STEADY_ON, NORMAL_BLINK, SOS_BLINK };
 const char *const MODE_NAMES[] = {"OFF", "STEADY_ON", "NORMAL_BLINK", "SOS_BLINK"};
 const char *const CODES[12] = {"P-01","P-02","P-03","P-04","P-05","P-06","P-07","P-08",
                                "M-01","M-02","M-03","M-04"};
@@ -42,6 +42,9 @@ Sensor sensors[12];
 Preferences prefs;
 bool lightCommands[12] = {};
 LightMode lightModes[12] = {};
+DoorState pocketDoor = DOOR_UNKNOWN, mediumDoor = DOOR_UNKNOWN;
+uint32_t lastDoorStateAt = 0;
+bool doorStateArmed = false;
 bool rawSwitch[12] = {}, stableSwitch[12] = {};
 uint32_t rawChangedAt[12] = {};
 uint16_t lastLightMask = 0xffff;
@@ -93,30 +96,9 @@ LightMode parseMode(const char *name) {
   return OFF;
 }
 
-bool sosOn(uint32_t elapsed) {
-  // 3 short, 3 long, 3 short; each pulse has a 150 ms gap.
-  const uint16_t widths[9] = {150,150,150,450,450,450,150,150,150};
-  uint32_t period = 750;
-  for (uint16_t width : widths) period += width + 150;
-  uint32_t phase = elapsed % period;
-  for (uint16_t width : widths) {
-    if (phase < width) return true;
-    phase -= width;
-    if (phase < 150) return false;
-    phase -= 150;
-  }
-  return false;
-}
-
 void updateLights() {
   uint32_t now = millis();
-  uint16_t mask = 0;
-  for (int i = 0; i < 12; ++i) {
-    bool on = lightModes[i] == STEADY_ON ||
-      (lightModes[i] == NORMAL_BLINK && now % 1300 < 650) ||
-      (lightModes[i] == SOS_BLINK && sosOn(now));
-    if (on) mask |= uint16_t(1) << LIGHT_BITS[i];
-  }
+  uint16_t mask = renderLightMask(lightModes, pocketDoor, mediumDoor, now);
   if (mask == lastLightMask) return;
   digitalWrite(LATCH_PIN, LOW);
   shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, uint8_t(mask >> 8));
@@ -130,6 +112,36 @@ void updateLights() {
     lastMaskLogAt = now;
   }
 #endif
+}
+
+DoorState parseDoorState(const char *name) {
+  if (name && strcmp(name, "open") == 0) return DOOR_OPEN;
+  if (name && strcmp(name, "closed") == 0) return DOOR_CLOSED;
+  return DOOR_UNKNOWN;
+}
+
+const char *doorStateName(DoorState state) {
+  if (state == DOOR_OPEN) return "open";
+  if (state == DOOR_CLOSED) return "closed";
+  return "unknown";
+}
+
+void clearLightGroup(bool pocket) {
+  int first = pocket ? 0 : 8, end = pocket ? 8 : 12;
+  for (int slot = first; slot < end; ++slot) {
+    lightModes[slot] = OFF;
+    lightCommands[slot] = false;
+  }
+}
+
+void applyDoorStates(DoorState nextPocket, DoorState nextMedium) {
+  // Closing, unknown, and stale states discard that bank's cached command.
+  // Reopening therefore needs a new guidance command and cannot resurrect one.
+  if (nextPocket != DOOR_OPEN) clearLightGroup(true);
+  if (nextMedium != DOOR_OPEN) clearLightGroup(false);
+  pocketDoor = nextPocket;
+  mediumDoor = nextMedium;
+  updateLights();
 }
 
 void publishPresence(int i, const char *kind) {
@@ -262,6 +274,10 @@ void telemetry() {
   JsonDocument doc;
   doc["v"] = 1; doc["type"] = "telemetry";
   doc["seq"] = ++seqNo; doc["uptime_ms"] = millis();
+  JsonObject doors = doc["doors"].to<JsonObject>();
+  doors["pocket"] = doorStateName(pocketDoor);
+  doors["medium"] = doorStateName(mediumDoor);
+  doors["fresh"] = doorStateArmed;
   JsonArray slots = doc["slots"].to<JsonArray>();
   for (int i = 0; i < 12; ++i) {
     Sensor &s = sensors[i];
@@ -334,6 +350,19 @@ void handleLine(const char *line) {
 #if SAULI_VERBOSE_DIAGNOSTICS
   Serial.printf("[LED] received command: %s\n", action);
 #endif
+  if (strcmp(action, "set_door_states") == 0) {
+    JsonObjectConst doors = doc["doors"].as<JsonObjectConst>();
+    const char *pocket = doors["pocket"] | "";
+    const char *medium = doors["medium"] | "";
+    if (doors.isNull() ||
+        (strcmp(pocket, "open") != 0 && strcmp(pocket, "closed") != 0 && strcmp(pocket, "unknown") != 0) ||
+        (strcmp(medium, "open") != 0 && strcmp(medium, "closed") != 0 && strcmp(medium, "unknown") != 0)) {
+      sendReply("error", id, "invalid_door_states"); return;
+    }
+    applyDoorStates(parseDoorState(pocket), parseDoorState(medium));
+    lastDoorStateAt = millis(); doorStateArmed = true;
+    sendReply("ack", id, "door_states_updated"); return;
+  }
   int i = slotIndex(doc["slot"] | "");
   if (strcmp(action, "set_all_lights") == 0) {
     JsonObjectConst modes = doc["modes"].as<JsonObjectConst>();
@@ -346,11 +375,13 @@ void handleLine(const char *line) {
     }
     for (int slot = 0; slot < 12; ++slot) {
       LightMode next = parseMode(modes[CODES[slot]] | "OFF");
+      if (!doorAllowsSlot(slot, pocketDoor, mediumDoor)) next = OFF;
 #if SAULI_VERBOSE_DIAGNOSTICS
       if (lightModes[slot] != next)
         Serial.printf("[LED] %s: %s -> %s\n", CODES[slot], MODE_NAMES[lightModes[slot]], MODE_NAMES[next]);
 #endif
       lightModes[slot] = next;
+      lightCommands[slot] = next != OFF;
     }
     lastGuidanceAt = millis(); guidanceArmed = true;
     updateLights(); sendReply("ack", id, "lights_updated"); return;
@@ -381,11 +412,12 @@ void handleLine(const char *line) {
   if (strcmp(action, "set_light") == 0) {
     const char *name = doc["mode"] | "";
     for (int mode = 0; mode < 4; ++mode) if (strcmp(name, MODE_NAMES[mode]) == 0) {
+      LightMode next = doorAllowsSlot(i, pocketDoor, mediumDoor) ? LightMode(mode) : OFF;
 #if SAULI_VERBOSE_DIAGNOSTICS
-      if (lightModes[i] != LightMode(mode))
-        Serial.printf("[LED] %s: %s -> %s\n", CODES[i], MODE_NAMES[lightModes[i]], name);
+      if (lightModes[i] != next)
+        Serial.printf("[LED] %s: %s -> %s\n", CODES[i], MODE_NAMES[lightModes[i]], MODE_NAMES[next]);
 #endif
-      lightModes[i] = LightMode(mode); updateLights();
+      lightModes[i] = next; lightCommands[i] = next != OFF; updateLights();
       sendReply("ack", id, "light_updated"); return;
     }
     sendReply("error", id, "invalid_mode"); return;
@@ -435,7 +467,7 @@ void setup() {
 #endif
   JsonDocument hello; hello["v"] = 1; hello["type"] = "hello";
   hello["seq"] = ++seqNo; hello["uptime_ms"] = millis();
-  hello["firmware"] = "sauli-esp-s3-0.2";
+  hello["firmware"] = "sauli-esp-s3-0.3";
   hello["boot_id"] = String(bootId, HEX);
   hello["sensor_mode"] = SWITCH_MODE ? "switch" : "hx711"; sendDoc(hello);
   if (SWITCH_MODE) for (int i = 0; i < 12; ++i) publishPresence(i, "SENSOR_SNAPSHOT");
@@ -444,9 +476,16 @@ void setup() {
 void loop() {
   pollSerial();
   if (guidanceArmed && millis() - lastGuidanceAt > GUIDANCE_TIMEOUT_MS) {
-    for (LightMode &mode : lightModes) mode = OFF;
+    for (int slot = 0; slot < 12; ++slot) {
+      lightModes[slot] = OFF; lightCommands[slot] = false;
+    }
     guidanceArmed = false;
     Serial.println("[LED] Guidance expired; all outputs off");
+  }
+  if (doorStateArmed && millis() - lastDoorStateAt > DOOR_STATE_TIMEOUT_MS) {
+    applyDoorStates(DOOR_UNKNOWN, DOOR_UNKNOWN);
+    doorStateArmed = false;
+    Serial.println("[LED] Door states stale; all compartment outputs off");
   }
   if (SWITCH_MODE) scanSwitches();
   else { sampleSharedClock(); updateFaults(); }

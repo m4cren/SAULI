@@ -1,0 +1,11 @@
+fastapi<1,>=0.115
+uvicorn<1,>=0.34
+pyserial<4,>=3.5
+
+[pi]
+gpiozero<3,>=2
+lgpio<1,>=0.2
+
+[test]
+pytest<10,>=8
+httpx<1,>=0.28

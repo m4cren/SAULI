@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.config import Settings
 from app.core.errors import ServiceError
 from app.integrations.ollama import OllamaGateway
+from app.integrations.direct_hardware import DirectHardwareGateway
 from app.repositories.supabase_found_items import SupabaseFoundItemRepository
 from app.repositories.supabase_kiosks import SupabaseKioskRepository
 from app.routes import found_items, hardware, health, kiosk_devices, matches, me, missing_reports, ollama, retrieval_sessions, storage_slots, units
@@ -42,11 +43,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         pass
                 await sender.close()
                 await gateway.close()
+                await app.state.hardware.close()
 
     app = FastAPI(title="SAULI API", lifespan=lifespan)
     app.state.settings = config
     app.state.items = SupabaseFoundItemRepository(config)
-    app.state.kiosks = SupabaseKioskRepository(app.state.items)
+    app.state.hardware = DirectHardwareGateway(config)
+    app.state.kiosks = SupabaseKioskRepository(
+        app.state.items, hardware=app.state.hardware,
+        hardware_transport=config.hardware_transport,
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(config.cors_origins),

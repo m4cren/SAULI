@@ -1,11 +1,16 @@
 {
   "mode": "simulation",
   "device_id": "REPLACE-WITH-REGISTERED-DEVICE-UUID",
+  "command_transport": "direct",
+  "direct_api_token": "REPLACE-WITH-THE-SAME-32-PLUS-CHARACTER-API-TOKEN",
+  "direct_bind_host": "127.0.0.1",
+  "direct_port": 8765,
+  "direct_replay_file": "/var/lib/sauli/hardware-command-replay.json",
+  "direct_incident_queue_file": "/var/lib/sauli/hardware-incident-queue.json",
   "reed_closed_level": {"medium": 0, "pocket": 0},
   "output_active_high": {
     "main_light": true, "buzzer": true,
-    "medium_solenoid": true, "pocket_solenoid": true,
-    "pocket_light_gate": true, "medium_light_gate": true
+    "medium_solenoid": true, "pocket_solenoid": true
   },
   "solenoid_pulse_seconds": 0.35,
   "gpio_sample_seconds": 0.05,

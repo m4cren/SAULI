@@ -1,12 +1,41 @@
 """Server-only settings. Never serialize this model into an API response."""
 
 from pathlib import Path
+from ipaddress import ip_address, ip_network
 import secrets
+from typing import Literal
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DirectHardwareEndpoint(BaseModel):
+    """Private Pi endpoint reachable only through the SAULI tailnet."""
+
+    model_config = ConfigDict(extra="forbid")
+    url: str
+    token: str = Field(min_length=32, repr=False)
+
+    @field_validator("url")
+    @classmethod
+    def private_tailscale_url(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Direct hardware URL must be HTTP or HTTPS")
+        if (parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in {"", "/"}):
+            raise ValueError("Direct hardware URL must be an origin without credentials or path data")
+        host = parsed.hostname.lower()
+        private_host = host in {"127.0.0.1", "localhost", "::1"} or host.endswith(".ts.net")
+        try:
+            private_host = private_host or ip_address(host) in ip_network("100.64.0.0/10")
+        except ValueError:
+            pass
+        if not private_host:
+            raise ValueError("Direct hardware URL must use loopback or a private Tailscale address")
+        return value.rstrip("/")
 
 
 class Settings(BaseSettings):
@@ -41,6 +70,11 @@ class Settings(BaseSettings):
     match_notification_min_score: float = Field(default=65, ge=0, le=100)
     environment: str = "development"
     hardware_test_enabled: bool = False
+    hardware_transport: Literal["direct", "legacy"] = "direct"
+    hardware_direct_devices: dict[str, DirectHardwareEndpoint] = Field(
+        default_factory=dict, repr=False
+    )
+    hardware_direct_timeout_seconds: float = Field(default=4, gt=0, le=15)
 
     @model_validator(mode="after")
     def require_production_retrieval_pepper(self) -> "Settings":
@@ -53,6 +87,12 @@ class Settings(BaseSettings):
             raise ValueError(
                 "RETRIEVAL_TOKEN_PEPPER must contain at least 32 characters in production"
             )
+        for device_id in self.hardware_direct_devices:
+            try:
+                from uuid import UUID
+                UUID(device_id)
+            except ValueError as exc:
+                raise ValueError("Hardware direct endpoint keys must be device UUIDs") from exc
         return self
 
     @field_validator("supabase_url")

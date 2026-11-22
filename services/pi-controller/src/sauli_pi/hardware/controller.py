@@ -13,8 +13,6 @@ class PinMap:
     buzzer: int = 17
     medium_solenoid: int = 23
     pocket_solenoid: int = 27
-    pocket_light_gate: int = 16
-    medium_light_gate: int = 20
 
 
 class DoorInput:
@@ -42,9 +40,16 @@ class DoorInput:
 
 
 class GPIOController:
-    OUTPUTS = {
+    # BCM16/20 belonged to removed AO4407A + 2N2222 bank gates. Keep them in
+    # the public snapshot for compatibility, but never claim them as outputs;
+    # the kernel therefore leaves both pins high-impedance.
+    OBSOLETE_HIGH_Z = {"pocket_light_gate": 16, "medium_light_gate": 20}
+    DRIVEN_OUTPUTS = {
         "main_light": 24, "buzzer": 17, "medium_solenoid": 23,
-        "pocket_solenoid": 27, "pocket_light_gate": 16, "medium_light_gate": 20,
+        "pocket_solenoid": 27,
+    }
+    OUTPUTS = {
+        **DRIVEN_OUTPUTS, **OBSOLETE_HIGH_Z,
     }
     INPUTS = {"medium": 8, "pocket": 7}
 
@@ -55,8 +60,9 @@ class GPIOController:
             raise ValueError("Solenoid pulse must be between 0.05 and 1 second")
         if set(closed_level) != set(self.INPUTS):
             raise ValueError("Both reed polarities must be configured")
-        if set(active_high) != set(self.OUTPUTS):
-            raise ValueError("All output polarities must be configured")
+        if (not set(self.DRIVEN_OUTPUTS).issubset(active_high)
+                or not set(active_high).issubset(self.OUTPUTS)):
+            raise ValueError("All driven output polarities must be configured")
         self.simulation = simulation
         self.closed_level = closed_level
         self.active_high = active_high
@@ -81,7 +87,7 @@ class GPIOController:
                 self._inputs[name] = DigitalInputDevice(
                     pin, pull_up=True, bounce_time=0.05, pin_factory=self.pin_factory)
             if self.allow_outputs:
-                for name, pin in self.OUTPUTS.items():
+                for name, pin in self.DRIVEN_OUTPUTS.items():
                     self._outputs[name] = DigitalOutputDevice(
                         pin, active_high=self.active_high[name], initial_value=False,
                         pin_factory=self.pin_factory)
@@ -102,7 +108,7 @@ class GPIOController:
         self.doors[name].update(level)
 
     def set_output(self, name: str, enabled: bool) -> None:
-        if name not in self.OUTPUTS or name.endswith("solenoid"):
+        if name not in self.DRIVEN_OUTPUTS or name.endswith("solenoid"):
             raise ValueError("Output not allowlisted for steady state")
         if not self.simulation and not self.allow_outputs:
             raise ValueError("Output polarity has not been verified")

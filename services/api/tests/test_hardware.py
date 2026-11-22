@@ -54,7 +54,8 @@ def test_hardware_heartbeat_rejects_anonymous_and_simulated_payload():
 
 def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields():
     device = {"id": str(uuid4()), "unit_id": str(uuid4())}
-    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False))
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False, hardware_transport="legacy"))
     app.dependency_overrides[get_device] = lambda: device
 
     class Kiosks:
@@ -96,7 +97,8 @@ def test_authenticated_heartbeat_uses_bound_device_and_strips_untrusted_fields()
 
 def test_fresh_reboot_snapshot_is_reconciled_before_alarm_guidance():
     device = {"id": str(uuid4()), "unit_id": str(uuid4())}
-    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False))
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False, hardware_transport="legacy"))
     app.dependency_overrides[get_device] = lambda: device
     calls = []
     slots = [
@@ -144,7 +146,8 @@ def test_fresh_reboot_snapshot_is_reconciled_before_alarm_guidance():
 
 def test_guidance_outage_does_not_claim_an_unlock_command():
     device = {"id": str(uuid4()), "unit_id": str(uuid4())}
-    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False))
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False, hardware_transport="legacy"))
     app.dependency_overrides[get_device] = lambda: device
     calls = []
 
@@ -173,7 +176,7 @@ def test_heartbeat_claims_queued_command_after_transient_503():
     device = {"id": str(uuid4()), "unit_id": str(uuid4())}
     command_id = str(uuid4())
     app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
-                              emailjs_enabled=False))
+                              emailjs_enabled=False, hardware_transport="legacy"))
     app.dependency_overrides[get_device] = lambda: device
     calls = []
 
@@ -281,7 +284,8 @@ def test_public_status_is_read_only_and_admin_control_disabled_by_default():
 
 def test_presence_events_are_device_scoped_and_validate_transitions():
     device = {"id": str(uuid4()), "unit_id": str(uuid4())}
-    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False))
+    app = create_app(Settings(supabase_url=None, supabase_service_role_key=None,
+                              emailjs_enabled=False, hardware_transport="legacy"))
     class Kiosks:
         async def device_from_credential(self, _credential):
             return None

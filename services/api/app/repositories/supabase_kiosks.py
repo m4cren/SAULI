@@ -6,7 +6,7 @@ import logging
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from postgrest.exceptions import APIError
@@ -30,9 +30,26 @@ def valid_secret(value: str | None) -> bool:
                 and all(char.isalnum() or char in "-_" for char in value))
 
 
+def merge_direct_warning(result: dict, state: dict) -> None:
+    """Overlay authenticated live Pi evidence without making it routine DB data."""
+    warning = state.get("local_warning") or {}
+    if (warning.get("monitoring") is not True
+            or warning.get("command_id") != result.get("_command_id")):
+        return
+    violations = warning.get("violations") or []
+    result["wrong_slots"] = [row["slot"] for row in violations
+        if isinstance(row, dict) and isinstance(row.get("slot"), str)]
+    if result["wrong_slots"]:
+        result["phase"] = "warning_active"
+    elif warning.get("provisional_success") is True:
+        result["phase"] = "provisional_success"
+
+
 class SupabaseKioskRepository:
-    def __init__(self, items):
+    def __init__(self, items, *, hardware=None, hardware_transport: str = "legacy"):
         self.items = items
+        self.hardware = hardware
+        self.hardware_transport = hardware_transport
 
     def client(self):
         return self.items.require()
@@ -262,19 +279,93 @@ class SupabaseKioskRepository:
     async def enqueue_workflow_unlock(self, device: dict, *,
                                       item_id: str | None = None,
                                       session_id: str | None = None) -> dict:
-        result = await self.rpc("sauli_queue_workflow_unlock", {
+        if self.hardware_transport == "legacy":
+            result = await self.rpc("sauli_queue_workflow_unlock", {
+                "p_device_id": device["id"], "p_item_id": item_id,
+                "p_session_id": session_id,
+            })
+            if not isinstance(result, dict) or result.get("error"):
+                code = result.get("error", "HARDWARE_UNAVAILABLE") if isinstance(result, dict) else "HARDWARE_UNAVAILABLE"
+                raise ServiceError(code, "The door could not be requested. Check the hardware and try again.", 503)
+            if result.get("status") == "failed":
+                raise ServiceError("UNLOCK_FAILED", "The unlock signal failed. Ask an operator to check the door.", 503)
+            return result
+
+        authorization = await self.rpc("sauli_authorize_workflow_unlock", {
             "p_device_id": device["id"], "p_item_id": item_id,
             "p_session_id": session_id,
         })
-        if not isinstance(result, dict) or result.get("error"):
-            code = result.get("error", "HARDWARE_UNAVAILABLE") if isinstance(result, dict) else "HARDWARE_UNAVAILABLE"
+        if not isinstance(authorization, dict) or authorization.get("error"):
+            code = authorization.get("error", "HARDWARE_UNAVAILABLE") if isinstance(authorization, dict) else "HARDWARE_UNAVAILABLE"
             raise ServiceError(code, "The door could not be requested. Check the hardware and try again.", 503)
-        if result.get("status") == "failed":
-            raise ServiceError("UNLOCK_FAILED", "The unlock signal failed. Ask an operator to check the door.", 503)
+        if self.hardware is None:
+            raise ServiceError("HARDWARE_UNAVAILABLE", "Direct hardware transport is unavailable.", 503)
+        command = {
+            "id": authorization["command_id"],
+            "device_id": device["id"],
+            "action": authorization["action"],
+            "expires_at": authorization["expires_at"],
+            "assigned_slot": authorization["assigned_slot"],
+            "expected_slots": authorization["expected_slots"],
+            "transport": "direct",
+        }
+        response = await self.hardware.command(device["id"], command)
+        if response.get("status") != "acked":
+            code = response.get("code", "hardware_rejected")
+            # A definitive, pre-pulse rejection may be given a new command ID
+            # after the operator corrects the unsafe state. Network failures are
+            # deliberately not recorded because execution would be ambiguous.
+            await self.rpc("sauli_record_direct_unlock_result", {
+                "p_device_id": device["id"],
+                "p_command_id": authorization["command_id"],
+                "p_status": "failed",
+                "p_code": code,
+            })
+            raise ServiceError(
+                code.upper(),
+                "The hardware rejected the unlock because it was not safe or ready.",
+                409,
+            )
+        snapshot = response.get("snapshot")
+        if isinstance(snapshot, dict):
+            # This is a workflow transition, not a periodic hardware snapshot.
+            await self.hardware_workflow_event(device, snapshot, None)
+        return {"command_id": authorization["command_id"], "status": "acked",
+                "code": response.get("code", "pulse_completed")}
+
+    async def hardware_workflow_event(self, device: dict, snapshot: dict,
+                                      presence: dict | None) -> dict:
+        if self.hardware_transport != "legacy":
+            if snapshot.get("local_incident_updates"):
+                incident_result = await self.rpc("sauli_apply_direct_security_updates", {
+                    "p_device_id": device["id"], "p_snapshot": snapshot,
+                })
+                if not isinstance(incident_result, dict) or incident_result.get("error"):
+                    raise ServiceError("HARDWARE_INCIDENT_UPDATE_FAILED",
+                                       "Security evidence could not be recorded.", 503)
+                return incident_result
+            result = await self.rpc("sauli_reconcile_direct_hardware_workflow", {
+                "p_device_id": device["id"], "p_snapshot": snapshot,
+            })
+            if not isinstance(result, dict):
+                raise ServiceError("HARDWARE_RECONCILIATION_FAILED",
+                                   "Hardware workflow state could not be reconciled.", 503)
+            return result
+        if presence is not None:
+            presence_result = await self.apply_hardware_presence(device, presence)
+            if presence_result.get("error"):
+                return presence_result
+        result = await self.rpc("sauli_reconcile_hardware_workflow", {
+            "p_device_id": device["id"], "p_snapshot": snapshot,
+        })
+        if not isinstance(result, dict):
+            raise ServiceError("HARDWARE_RECONCILIATION_FAILED",
+                               "Hardware workflow state could not be reconciled.", 503)
         return result
 
     async def hardware_workflow(self, device: dict, *, item_id: str | None,
                                 session_id: str | None) -> dict:
+        direct = self.hardware_transport != "legacy"
         def fetch():
             client = self.client()
             item = None
@@ -300,9 +391,9 @@ class SupabaseKioskRepository:
                 slots = (client.table("storage_slots").select("id,code")
                     .eq("unit_id", device["unit_id"]).execute().data or [])
                 codes = {row["id"]: row["code"] for row in slots}
-            snapshots = (client.table("sauli_hardware_snapshots").select("received_at,snapshot")
-                .eq("unit_id", device["unit_id"]).order("received_at", desc=True)
-                .limit(1).execute().data or [])
+            snapshots = [] if direct else (client.table("sauli_hardware_snapshots")
+                .select("received_at,snapshot").eq("unit_id", device["unit_id"])
+                .order("received_at", desc=True).limit(1).execute().data or [])
             transaction_rows = (client.table("sauli_hardware_transactions")
                 .select("phase,last_door,found_item_id,retrieval_session_id,command_id")
                 .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
@@ -311,7 +402,7 @@ class SupabaseKioskRepository:
                    (session_id and row["retrieval_session_id"] == session_id)), None)
             unlock_retry_available = False
             unlock_command_status = None
-            if transaction and transaction.get("command_id"):
+            if transaction and transaction.get("command_id") and not direct:
                 commands = (client.table("sauli_hardware_commands")
                     .select("status,expires_at").eq("id", transaction["command_id"])
                     .eq("unit_id", device["unit_id"]).limit(1).execute().data or [])
@@ -337,6 +428,8 @@ class SupabaseKioskRepository:
                                        "deactivated_at": reported.get("deactivated_at")}
                     if age <= 5 and transaction.get("last_door") in ("open", "closed"):
                         observed_door = transaction["last_door"]
+            if direct and transaction and transaction.get("command_id"):
+                unlock_command_status = "acked"
             return {"placement_status": item["placement_status"] if item else None,
                     "retrieval_status": session["status"] if session else None,
                     "wrong_slots": [codes.get(row["slot_id"], "unknown") for row in incidents],
@@ -345,10 +438,34 @@ class SupabaseKioskRepository:
                     "door": observed_door,
                     "last_unlock": last_unlock,
                     "unlock_command_status": unlock_command_status,
-                    "unlock_retry_available": unlock_retry_available}
-        return await self._read_with_retry(fetch, "workflow")
+                    "unlock_retry_available": unlock_retry_available,
+                    "_command_id": transaction.get("command_id") if transaction else None}
+        result = await self._read_with_retry(fetch, "workflow")
+        if direct and self.hardware is not None:
+            try:
+                state = await self.hardware.state(device["id"])
+                result["hardware_online"] = bool(state)
+                reported = state.get("last_unlock") or {}
+                result["last_unlock"] = ({
+                    "status": reported.get("status"),
+                    "activated_at": reported.get("activated_at"),
+                    "deactivated_at": reported.get("deactivated_at"),
+                } if reported else None)
+                workflow = state.get("door_workflow") or {}
+                door = workflow.get("door")
+                if door in {"pocket", "medium"}:
+                    observed = ((state.get("pi") or {}).get("doors") or {}).get(door) or {}
+                    if observed.get("door") in {"open", "closed"}:
+                        result["door"] = observed["door"]
+                merge_direct_warning(result, state)
+            except ServiceError:
+                result["hardware_online"] = False
+        result.pop("_command_id", None)
+        return result
 
     async def claim_hardware_commands(self, device: dict) -> list[dict]:
+        if self.hardware_transport != "legacy":
+            return []
         rows = await self.rpc("sauli_claim_hardware_commands", {
             "p_device_id": device["id"], "p_unit_id": device["unit_id"]})
         return [{"id": row["id"], "device_id": row["device_id"],
@@ -358,6 +475,8 @@ class SupabaseKioskRepository:
 
     async def ack_hardware_command(self, device: dict, command_id: str,
                                    status: str, code: str) -> bool:
+        if self.hardware_transport != "legacy":
+            return False
         rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_commands")
             .update({"status": status, "result_code": code,
                      "acknowledged_at": datetime.now(UTC).isoformat()})
@@ -370,6 +489,12 @@ class SupabaseKioskRepository:
         device = await run_in_threadpool(lambda: self._active_device(device_id))
         if device is None:
             raise ServiceError("DEVICE_ACCESS_DENIED", "Device is not active.", 403)
+        if self.hardware_transport != "legacy":
+            raise ServiceError(
+                "DIRECT_TEST_UNLOCK_DISABLED",
+                "Direct-mode solenoid tests cannot bypass the workflow unlock guard.",
+                403,
+            )
         expires = datetime.now(UTC) + timedelta(seconds=10)
         rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_commands")
             .insert({"device_id": device["id"], "unit_id": device["unit_id"],
@@ -378,6 +503,16 @@ class SupabaseKioskRepository:
         return rows[0]
 
     async def enqueue_capture_light(self, device: dict, enabled: bool) -> dict:
+        if self.hardware_transport != "legacy":
+            expires = datetime.now(UTC) + timedelta(seconds=10)
+            command_id = str(uuid4())
+            response = await self.hardware.command(device["id"], {
+                "id": command_id, "device_id": device["id"],
+                "action": "capture_light_on" if enabled else "capture_light_off",
+                "expires_at": expires.isoformat(), "transport": "direct",
+            })
+            return {"id": command_id, "status": response.get("status"),
+                    "code": response.get("code")}
         expires = datetime.now(UTC) + timedelta(seconds=10)
         rows = await run_in_threadpool(lambda: self.client().table("sauli_hardware_commands")
             .insert({"device_id": device["id"], "unit_id": device["unit_id"],
@@ -387,6 +522,38 @@ class SupabaseKioskRepository:
         return rows[0]
 
     async def public_hardware_status(self) -> dict:
+        if self.hardware_transport != "legacy" and self.hardware is not None:
+            units, devices = await asyncio.gather(self.locations(), self.devices())
+            labels = {unit["id"]: unit["display_name"] for unit in units}
+            active = [device for device in devices
+                      if device["status"] == "active" and not device["revoked_at"]
+                      and self.hardware.configured(device["id"])]
+            states = await self.hardware.states([device["id"] for device in active])
+            result = []
+            for device in active:
+                snapshot = states.get(device["id"]) or {}
+                if not snapshot or device["unit_id"] not in labels:
+                    continue
+                pi = snapshot.get("pi") or {}
+                esp = snapshot.get("esp") or {}
+                telemetry = esp.get("telemetry") or {}
+                result.append({
+                    "unit_name": labels[device["unit_id"]],
+                    "received_at": snapshot.get("recorded_at"),
+                    "sequence": snapshot.get("sequence"),
+                    "observed_at": snapshot.get("observed_at"),
+                    "connection": "online",
+                    "doors": pi.get("doors", {}), "outputs": pi.get("outputs", {}),
+                    "lock_feedback": "unavailable",
+                    "door_workflow": snapshot.get("door_workflow", {}),
+                    "last_unlock": snapshot.get("last_unlock"),
+                    "esp": {"connection": esp.get("connection", "offline"),
+                            "frame_errors": esp.get("frame_errors", 0),
+                            "error": esp.get("error"),
+                            "slots": telemetry.get("slots", [])},
+                    "events": snapshot.get("events", [])[:10],
+                })
+            return {"units": result}
         rows, units, devices = await asyncio.gather(
             self._read_with_retry(lambda: self.client().table("sauli_hardware_snapshots")
                 .select("device_id,unit_id,snapshot,received_at").order("received_at", desc=True)

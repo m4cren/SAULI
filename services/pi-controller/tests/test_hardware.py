@@ -273,6 +273,46 @@ def test_reed_polarity_and_debounce():
     assert door.snapshot()["door"] == "closed"
 
 
+def test_obsolete_bcm16_bcm20_light_gates_remain_high_impedance():
+    gpio = GPIOController(
+        simulation=True, closed_level={"pocket": 0, "medium": 0},
+        active_high={name: True for name in GPIOController.DRIVEN_OUTPUTS},
+    )
+    assert GPIOController.OBSOLETE_HIGH_Z == {
+        "pocket_light_gate": 16, "medium_light_gate": 20}
+    assert not set(GPIOController.OBSOLETE_HIGH_Z) & set(GPIOController.DRIVEN_OUTPUTS)
+    assert gpio.outputs["pocket_light_gate"] is False
+    assert gpio.outputs["medium_light_gate"] is False
+    with pytest.raises(ValueError, match="not allowlisted"):
+        gpio.set_output("pocket_light_gate", True)
+
+
+def test_pi_sends_both_reed_states_to_esp_over_existing_uart(tmp_path: Path):
+    config = Config("https://api.example.test", "https://app.example.test", "KIOSK-A",
+                    "SAULI-A", tmp_path / "credential")
+    settings = {"mode": "simulation",
+                "reed_closed_level": {"pocket": 0, "medium": 0},
+                "output_active_high": {
+                    name: True for name in GPIOController.DRIVEN_OUTPUTS}}
+    service = HardwareService(config, settings)
+    service.gpio.open()
+    service.gpio.set_simulated_door("pocket", 0)
+    service.gpio.doors["pocket"].update(0, now=time.monotonic() + 0.1)
+    service.record_door_changes()
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    service.esp.send = send
+    asyncio.run(service._send_door_states())
+    assert len(sent) == 1
+    assert sent[0]["type"] == "command"
+    assert sent[0]["action"] == "set_door_states"
+    assert sent[0]["doors"] == {"pocket": "closed", "medium": "open"}
+    assert service._door_state_dirty is False
+
+
 def test_simulated_gpio_pulse_is_bounded_and_cleans_up_on_cancel():
     async def exercise():
         gpio = GPIOController(simulation=True, closed_level={"pocket": 0, "medium": 0},

@@ -98,6 +98,28 @@ class LastUnlockState(BaseModel):
     last_output_error: Literal["hardware_failure"] | None = None
 
 
+class LocalViolation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slot: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    kind: Literal["wrong_placement", "wrong_removal"]
+
+
+class LocalWarningState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    monitoring: bool = False
+    active: bool = False
+    command_id: UUID | None = None
+    assigned_slot: str | None = Field(
+        default=None, pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    operation: Literal["deposit", "retrieval"] | None = None
+    provisional_success: bool = False
+    violations: list[LocalViolation] = Field(default_factory=list, max_length=12)
+
+
+class LocalIncidentUpdate(LocalViolation):
+    active: bool
+
+
 class HardwareSnapshot(BaseModel):
     model_config = ConfigDict(extra="ignore")
     sequence: int | None = Field(default=None, ge=0)
@@ -109,6 +131,9 @@ class HardwareSnapshot(BaseModel):
     door_workflow: DoorWorkflowState = Field(default_factory=DoorWorkflowState)
     last_unlock: LastUnlockState | None = None
     pending_presence_count: int | None = Field(default=None, ge=0, le=128)
+    local_warning: LocalWarningState = Field(default_factory=LocalWarningState)
+    local_incident_updates: list[LocalIncidentUpdate] = Field(
+        default_factory=list, max_length=24)
 
 
 class Heartbeat(BaseModel):
@@ -139,6 +164,12 @@ class PresenceEvent(BaseModel):
     present: bool
 
 
+class WorkflowEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snapshot: HardwareSnapshot
+    presence: PresenceEvent | None = None
+
+
 class CaptureLightRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
@@ -146,6 +177,12 @@ class CaptureLightRequest(BaseModel):
 
 @router.post("/heartbeat")
 async def heartbeat(request: Request, payload: Heartbeat, device: Device):
+    if request.app.state.settings.hardware_transport == "direct":
+        raise ServiceError(
+            "LEGACY_HARDWARE_TRANSPORT_DISABLED",
+            "Periodic hardware transport is disabled in direct mode.",
+            410,
+        )
     await request.app.state.kiosks.hardware_heartbeat(
         device, payload.snapshot.model_dump(mode="json"))
     guidance = await request.app.state.kiosks.hardware_guidance(device)
@@ -160,12 +197,36 @@ async def heartbeat(request: Request, payload: Heartbeat, device: Device):
 
 @router.post("/presence")
 async def presence(request: Request, payload: PresenceEvent, device: Device):
+    if request.app.state.settings.hardware_transport == "direct":
+        raise ServiceError(
+            "LEGACY_HARDWARE_TRANSPORT_DISABLED",
+            "Routine sensor transport is disabled in direct mode.",
+            410,
+        )
     if payload.kind == "ITEM_PRESENT" and not payload.present or payload.kind == "ITEM_REMOVED" and payload.present:
         raise ServiceError("INVALID_SENSOR_EVENT", "The sensor event is inconsistent.", 422)
     result = await request.app.state.kiosks.apply_hardware_presence(device, payload.model_dump())
     if result.get("error"):
         raise ServiceError("SENSOR_EVENT_REJECTED", "The sensor event could not be recorded.", 422)
     return result
+
+
+@router.post("/workflow-event")
+async def workflow_event(request: Request, payload: WorkflowEvent, device: Device):
+    presence_data = payload.presence.model_dump() if payload.presence else None
+    if presence_data and (
+        presence_data["kind"] == "ITEM_PRESENT" and not presence_data["present"]
+        or presence_data["kind"] == "ITEM_REMOVED" and presence_data["present"]
+    ):
+        raise ServiceError("INVALID_SENSOR_EVENT", "The sensor event is inconsistent.", 422)
+    result = await request.app.state.kiosks.hardware_workflow_event(
+        device, payload.snapshot.model_dump(mode="json"), presence_data,
+    )
+    if result.get("error"):
+        raise ServiceError("HARDWARE_EVENT_REJECTED",
+                           "The workflow event could not be reconciled.", 422)
+    guidance = await request.app.state.kiosks.hardware_guidance(device)
+    return {**result, "guidance": guidance}
 
 
 @router.get("/workflow")
@@ -185,6 +246,12 @@ async def capture_light(request: Request, payload: CaptureLightRequest, kiosk: K
 
 @router.post("/ack")
 async def acknowledge(request: Request, payload: Ack, device: Device):
+    if request.app.state.settings.hardware_transport == "direct":
+        raise ServiceError(
+            "LEGACY_HARDWARE_TRANSPORT_DISABLED",
+            "Database command acknowledgments are disabled in direct mode.",
+            410,
+        )
     return {"ok": await request.app.state.kiosks.ack_hardware_command(
         device, str(payload.id), payload.status, payload.code)}
 
