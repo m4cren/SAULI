@@ -7,6 +7,7 @@
   "direct_port": 8765,
   "direct_replay_file": "/var/lib/sauli/hardware-command-replay.json",
   "direct_incident_queue_file": "/var/lib/sauli/hardware-incident-queue.json",
+  "direct_completion_queue_file": "/var/lib/sauli/hardware-completion-queue.json",
   "reed_closed_level": {"medium": 0, "pocket": 0},
   "output_active_high": {
     "main_light": true, "buzzer": true,

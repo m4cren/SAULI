@@ -27,6 +27,8 @@ HELD_UNLOCK_MIGRATION = (Path(__file__).resolve().parents[3]
     / "supabase/migrations/202611220002_sauli_held_unlock_workflow.sql")
 RECOVERY_MIGRATION = (Path(__file__).resolve().parents[3]
     / "supabase/migrations/202611220003_sauli_direct_unlock_recovery.sql")
+LOCAL_COMPLETION_MIGRATION = (Path(__file__).resolve().parents[3]
+    / "supabase/migrations/202611220004_sauli_local_physical_completion.sql")
 
 
 def hardware_snapshot() -> dict:
@@ -97,7 +99,7 @@ def test_direct_unlock_uses_authorization_rpc_and_never_command_queue(action):
     assert [name for name, _ in calls] == ["sauli_authorize_workflow_unlock"]
 
 
-def test_direct_rejection_is_secure_without_post_authorization_database_write():
+def test_definitive_pre_activation_rejection_is_recorded_for_new_authorization():
     device_id, unit_id, command_id = (str(uuid4()) for _ in range(3))
     calls = []
     issued_grant = "signed-grant." + "x" * 100
@@ -125,7 +127,10 @@ def test_direct_rejection_is_secure_without_post_authorization_database_write():
                 "assigned_slot": "P-01", "expected_slots": [],
                 "expires_at": (datetime.now(UTC) + timedelta(seconds=10)).isoformat(),
             }
-        raise AssertionError(f"Unlock delivery must not call {name}")
+        assert name == "sauli_record_direct_unlock_result"
+        assert params["p_command_id"] == command_id
+        assert params["p_code"] == "sensor_state_mismatch"
+        return True
 
     repository.rpc = rpc
     with pytest.raises(ServiceError) as error:
@@ -133,7 +138,8 @@ def test_direct_rejection_is_secure_without_post_authorization_database_write():
             {"id": device_id, "unit_id": unit_id}, item_id=str(uuid4())))
     assert error.value.code == "SENSOR_STATE_MISMATCH"
     assert error.value.status_code == 409
-    assert calls == ["sauli_authorize_workflow_unlock"]
+    assert calls == ["sauli_authorize_workflow_unlock",
+                     "sauli_record_direct_unlock_result"]
 
 
 def test_previously_authorized_grant_unlocks_without_supabase_round_trip():
@@ -161,7 +167,7 @@ def test_previously_authorized_grant_unlocks_without_supabase_round_trip():
                       "code": "unlock_held", "unlock_grant": issued_grant}
 
 
-def test_supabase_outage_after_unlock_never_returns_false_success():
+def test_gpio_ack_returns_without_waiting_for_supabase_reconciliation():
     device_id, unit_id, workflow_id, command_id = (str(uuid4()) for _ in range(4))
     issued_grant = "signed-grant." + "x" * 100
     delivered = []
@@ -179,11 +185,11 @@ def test_supabase_outage_after_unlock_never_returns_false_success():
         raise ServiceError("DATABASE_UNAVAILABLE", "Database unavailable.", 503)
 
     repository.rpc = unavailable
-    with pytest.raises(ServiceError) as error:
-        asyncio.run(repository.enqueue_workflow_unlock(
-            {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
-            grant=issued_grant))
-    assert error.value.code == "DATABASE_UNAVAILABLE"
+    result = asyncio.run(repository.enqueue_workflow_unlock(
+        {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
+        grant=issued_grant))
+    assert result["status"] == "acked"
+    assert result["command_id"] == command_id
     assert delivered == [issued_grant]
 
 
@@ -395,6 +401,150 @@ def test_unlock_grant_rejects_expiry_and_wrong_workflow(monkeypatch):
         asyncio.run(gateway.close())
 
 
+def test_uncertain_delivery_is_resolved_from_authenticated_pi_without_resend():
+    gateway, device, workflow_id, authorization = _gateway_fixture()
+    grant = gateway.issue_unlock_grant(
+        device, authorization, workflow_id=workflow_id, operation="deposit")
+    command_calls = []
+
+    async def uncertain(_device_id, command):
+        command_calls.append(command["id"])
+        raise ServiceError("HARDWARE_UNAVAILABLE", "lost response", 503)
+
+    async def accepted_state(_device_id):
+        return {"last_unlock": {
+            "command_id": authorization["command_id"], "status": "completed",
+            "activated_at": datetime.now(UTC).isoformat(),
+        }}
+
+    gateway.command = uncertain
+    gateway.state = accepted_state
+    try:
+        first = asyncio.run(gateway.command_from_grant(
+            device, grant, workflow_id=workflow_id, operation="deposit"))
+        second = asyncio.run(gateway.command_from_grant(
+            device, grant, workflow_id=workflow_id, operation="deposit"))
+        assert first["status"] == second["status"] == "acked"
+        assert first["code"] == "unlock_already_accepted"
+        assert command_calls == [authorization["command_id"]]
+    finally:
+        asyncio.run(gateway.close())
+
+
+def test_unconfirmed_delivery_never_claims_gpio_activation_or_resends():
+    gateway, device, workflow_id, authorization = _gateway_fixture()
+    grant = gateway.issue_unlock_grant(
+        device, authorization, workflow_id=workflow_id, operation="deposit")
+    command_calls = []
+
+    async def uncertain(_device_id, command):
+        command_calls.append(command["id"])
+        raise ServiceError("HARDWARE_UNAVAILABLE", "lost response", 503)
+
+    async def no_evidence(_device_id):
+        return {"last_unlock": None}
+
+    gateway.command = uncertain
+    gateway.state = no_evidence
+    try:
+        with pytest.raises(ServiceError) as first:
+            asyncio.run(gateway.command_from_grant(
+                device, grant, workflow_id=workflow_id, operation="deposit"))
+        assert first.value.code == "HARDWARE_DELIVERY_UNCONFIRMED"
+        with pytest.raises(ServiceError) as retry:
+            asyncio.run(gateway.command_from_grant(
+                device, grant, workflow_id=workflow_id, operation="deposit"))
+        assert retry.value.code == "HARDWARE_DELIVERY_UNCONFIRMED"
+        assert command_calls == [authorization["command_id"]]
+    finally:
+        asyncio.run(gateway.close())
+
+
+def test_local_completion_uses_post_physical_completion_rpc():
+    device = {"id": str(uuid4()), "unit_id": str(uuid4())}
+    repository = SupabaseKioskRepository(None, hardware_transport="direct")
+    calls = []
+    snapshot = {"local_completion": {"verified": True, "command_id": str(uuid4())}}
+
+    async def rpc(name, params):
+        calls.append((name, params))
+        return {"phase": "completed", "finalized": True}
+
+    repository.rpc = rpc
+    result = asyncio.run(repository.hardware_workflow_event(device, snapshot, None))
+    assert result["finalized"] is True
+    assert calls == [("sauli_reconcile_local_hardware_completion", {
+        "p_device_id": device["id"], "p_snapshot": snapshot,
+    })]
+
+
+def test_live_direct_workflow_uses_pi_state_without_supabase_read():
+    workflow_id, command_id = str(uuid4()), str(uuid4())
+
+    class Hardware:
+        async def state(self, _device_id):
+            return {
+                "pi": {"doors": {"pocket": {"door": "closed"}}},
+                "last_unlock": {"status": "completed", "activated_at": "now",
+                                "deactivated_at": "now"},
+                "door_workflow": {"door": "pocket"},
+                "local_warning": {
+                    "monitoring": True, "command_id": command_id,
+                    "workflow_id": workflow_id, "assigned_slot": "P-01",
+                    "operation": "deposit", "assigned_present": True,
+                    "expected_present": True, "provisional_success": True,
+                    "awaiting_finalization": True,
+                    "finalization_error": "SYNCHRONIZATION_PENDING",
+                    "local_phase": "locally_completed", "locally_completed": True,
+                    "sync_pending": True, "violations": [],
+                },
+            }
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+    result = asyncio.run(repository.hardware_workflow(
+        {"id": str(uuid4()), "unit_id": str(uuid4())},
+        item_id=workflow_id, session_id=None))
+    assert result["phase"] == "synchronizing"
+    assert result["locally_completed"] is True
+    assert result["sync_pending"] is True
+    assert result["door"] == "closed"
+
+
+def test_operator_review_rearm_uses_fresh_authenticated_direct_state():
+    unit_id, device_id, actor_id = (uuid4() for _ in range(3))
+    snapshot = hardware_snapshot()
+
+    class Hardware:
+        async def state(self, requested_device_id):
+            assert requested_device_id == str(device_id)
+            return snapshot
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+    calls = []
+
+    async def read_device(_callback, label):
+        assert label == "review device"
+        return {"id": str(device_id)}
+
+    async def rpc(name, params):
+        calls.append((name, params))
+        return {"status": "rearmed", "resolution_id": str(uuid4())}
+
+    repository._read_with_retry = read_device
+    repository.rpc = rpc
+    result = asyncio.run(repository.rearm_unopened_hardware_review(
+        unit_id, actor_id, "Reviewed physical and database state match."))
+    assert result["status"] == "rearmed"
+    assert calls == [("sauli_rearm_direct_hardware_review", {
+        "p_unit_id": str(unit_id), "p_device_id": str(device_id),
+        "p_actor_id": str(actor_id),
+        "p_reason": "Reviewed physical and database state match.",
+        "p_snapshot": snapshot,
+    })]
+
+
 def test_direct_timeout_recovery_sql_requires_fresh_authenticated_safe_state():
     sql = RECOVERY_MIGRATION.read_text(encoding="utf-8").lower()
     assert "sauli_recover_direct_unopened_workflow" in sql
@@ -406,6 +556,25 @@ def test_direct_timeout_recovery_sql_requires_fresh_authenticated_safe_state():
     assert "p_snapshot #>> '{pi,outputs,medium_solenoid}' is distinct from 'false'" in sql
     assert "jsonb_array_length(p_snapshot #> '{esp,telemetry,slots}') <> 12" in sql
     assert "sauli_hardware_review_resolutions" in sql
+    assert "insert into public.sauli_hardware_commands" not in sql
+
+
+def test_local_completion_migration_keeps_gpio_independent_and_recovery_guarded():
+    sql = LOCAL_COMPLETION_MIGRATION.read_text(encoding="utf-8").lower()
+    completion = sql.split(
+        "create function public.sauli_reconcile_local_hardware_completion", 1)[1]
+    assert "'{pi,outputs,pocket_solenoid}' is distinct from 'false'" in completion
+    assert "'{pi,outputs,medium_solenoid}' is distinct from 'false'" in completion
+    assert "local_completion" in completion
+    assert "telemetry_sequence" in completion
+    assert "unresolved_hardware_incident" in completion
+    assert "if v_tx.phase='completed'" in completion
+    assert "on conflict (retrieval_session_id) do nothing" in completion
+    recovery = sql.split("create function public.sauli_rearm_direct_hardware_review", 1)[1]
+    assert "v_tx.phase <> 'requires_review'" in recovery
+    assert "unresolved_hardware_incident" in recovery
+    assert "physical_database_mismatch" in recovery
+    assert "command_id=null" in recovery
     assert "insert into public.sauli_hardware_commands" not in sql
 
 

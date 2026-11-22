@@ -7,8 +7,12 @@ export function hardwareWorkflowError(workflow: HardwareWorkflow): string | null
     return "Final verification failed. Keep the door closed and ask SAULI staff to review the cabinet.";
   }
   if (!workflow.finalization_error) return null;
+  if (workflow.finalization_error === "SYNCHRONIZATION_PENDING"
+    && workflow.locally_completed) return null;
   if (workflow.finalization_error === "BACKEND_UNAVAILABLE") {
-    return "The door is closed, but SAULI cannot reach the backend. Keep it closed while the connection recovers.";
+    return workflow.locally_completed
+      ? "The door is secured locally. SAULI will keep retrying the database synchronization."
+      : "SAULI cannot reach the backend. Keep the door and item unchanged while the connection recovers.";
   }
   if (["FINALIZATION_PENDING", "FRESH_POST_CLOSE_SENSOR_REQUIRED", "FRESH_SNAPSHOT_REQUIRED",
     "POST_CLOSE_SEQUENCE_REQUIRED", "SENSOR_DATA_INCOMPLETE"].includes(workflow.finalization_error)) {

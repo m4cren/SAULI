@@ -24,7 +24,7 @@ class DirectHardwareGateway:
             timeout=settings.hardware_direct_timeout_seconds,
             follow_redirects=False,
         )
-        self._used_grants: dict[str, int] = {}
+        self._used_grants: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _encode(value: bytes) -> str:
@@ -90,27 +90,85 @@ class DirectHardwareGateway:
                 or slot.startswith("P-") != (door == "pocket")
                 or not isinstance(expected_slots, list) or len(expected_slots) != 12):
             raise ServiceError("INVALID_UNLOCK_GRANT", "The door authorization is invalid.", 403)
-        self._used_grants = {key: expiry for key, expiry in self._used_grants.items()
-                             if expiry > now}
+        self._used_grants = {
+            key: value for key, value in self._used_grants.items()
+            if value["exp"] > now
+        }
         if consume:
             if claims["jti"] in self._used_grants:
                 raise ServiceError("UNLOCK_GRANT_REPLAYED", "This door authorization was already used.", 409)
-            self._used_grants[claims["jti"]] = claims["exp"]
+            self._used_grants[claims["jti"]] = {
+                "exp": claims["exp"], "status": "consumed"}
         return claims
+
+    @staticmethod
+    def _command_state(command_id: str, state: dict) -> dict | None:
+        reported = state.get("last_unlock") or {}
+        if reported.get("command_id") != command_id:
+            return None
+        status = reported.get("status")
+        if reported.get("activated_at") and status in {"accepted", "completed", "failed"}:
+            return {"id": command_id, "status": "acked",
+                    "code": "unlock_already_accepted", "snapshot": state}
+        if status in {"rejected", "failed"}:
+            return {"id": command_id, "status": "failed",
+                    "code": reported.get("last_output_error") or "hardware_rejected",
+                    "snapshot": state}
+        return None
+
+    async def _resolve_uncertain_delivery(self, device: dict, command_id: str) -> dict | None:
+        try:
+            state = await self.state(device["id"])
+        except ServiceError:
+            return None
+        return self._command_state(command_id, state)
 
     async def command_from_grant(self, device: dict, grant: str, *,
                                  workflow_id: str, operation: str) -> dict:
         claims = self.verify_unlock_grant(
-            device, grant, workflow_id=workflow_id, operation=operation, consume=True)
+            device, grant, workflow_id=workflow_id, operation=operation)
+        command_id = claims["jti"]
+        existing = self._used_grants.get(command_id)
+        if existing is not None:
+            resolved = await self._resolve_uncertain_delivery(device, command_id)
+            if resolved is not None:
+                return resolved
+            code = ("HARDWARE_DELIVERY_UNCONFIRMED"
+                    if existing["status"] in {"inflight", "uncertain"}
+                    else "UNLOCK_GRANT_REPLAYED")
+            message = ("The original unlock delivery is still unconfirmed. Check the live Pi state."
+                       if code == "HARDWARE_DELIVERY_UNCONFIRMED"
+                       else "This door authorization was already used.")
+            raise ServiceError(code, message, 409)
+        # Reserve locally against concurrent requests, but retain an uncertain
+        # state that can be resolved from the authenticated Pi rather than
+        # treating a network failure as proof that delivery did not happen.
+        self._used_grants[command_id] = {"exp": claims["exp"], "status": "inflight"}
         command = {
-            "id": claims["jti"], "device_id": claims["device_id"],
+            "id": command_id, "device_id": claims["device_id"],
             "action": f"pulse_{claims['door']}",
             "expires_at": datetime.fromtimestamp(claims["exp"], UTC).isoformat(),
             "assigned_slot": claims["slot"],
             "expected_slots": claims["expected_slots"],
             "transport": "direct", "grant": grant,
         }
-        return await self.command(device["id"], command)
+        try:
+            result = await self.command(device["id"], command)
+        except ServiceError as exc:
+            self._used_grants[command_id]["status"] = "uncertain"
+            resolved = await self._resolve_uncertain_delivery(device, command_id)
+            if resolved is not None:
+                self._used_grants[command_id]["status"] = (
+                    "accepted" if resolved["status"] == "acked" else "rejected")
+                return resolved
+            raise ServiceError(
+                "HARDWARE_DELIVERY_UNCONFIRMED",
+                "The unlock request reached an uncertain delivery state. The Pi did not confirm GPIO activation.",
+                503,
+            ) from exc
+        self._used_grants[command_id]["status"] = (
+            "accepted" if result.get("status") == "acked" else "rejected")
+        return result
 
     def configured(self, device_id: str) -> bool:
         return device_id in self.settings.hardware_direct_devices

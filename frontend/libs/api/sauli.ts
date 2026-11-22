@@ -65,7 +65,7 @@ export interface HardwareWorkflow {
   retrieval_status: RetrievalStatus | null;
   wrong_slots: string[];
   hardware_online: boolean;
-  phase: "awaiting_door_open" | "door_open" | "provisional_success" | "warning_active" | "awaiting_door_close" | "requires_review" | "completed" | null;
+  phase: "awaiting_door_open" | "door_open" | "provisional_success" | "warning_active" | "awaiting_door_close" | "synchronizing" | "requires_review" | "completed" | null;
   door: "open" | "closed" | "unknown";
   assigned_slot: string | null;
   assigned_present: boolean | null;
@@ -73,6 +73,9 @@ export interface HardwareWorkflow {
   provisional_success: boolean;
   awaiting_finalization: boolean;
   finalization_error: string | null;
+  local_phase: "authorized" | "unlocked" | "door_open" | "item_verified" | "door_closed" | "locally_completed" | "synced" | "fault" | null;
+  locally_completed: boolean;
+  sync_pending: boolean;
   last_unlock: { status: "received" | "accepted" | "completed" | "rejected" | "failed"; activated_at: string | null; deactivated_at: string | null } | null;
   unlock_command_status: "pending" | "claimed" | "acked" | "failed" | null;
   unlock_retry_available: boolean;

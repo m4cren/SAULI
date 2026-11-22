@@ -135,6 +135,8 @@ def load_hardware(path: Path) -> dict:
             value.setdefault("direct_replay_file", "/var/lib/sauli/hardware-command-replay.json")
             value.setdefault("direct_incident_queue_file",
                              "/var/lib/sauli/hardware-incident-queue.json")
+            value.setdefault("direct_completion_queue_file",
+                             "/var/lib/sauli/hardware-completion-queue.json")
     return value
 
 
@@ -182,6 +184,8 @@ class HardwareService:
         self._last_unlock: dict | None = None
         incident_name = settings.get("direct_incident_queue_file")
         self._incident_queue_file = Path(incident_name) if incident_name else None
+        completion_name = settings.get("direct_completion_queue_file")
+        self._completion_queue_file = Path(completion_name) if completion_name else None
         self._local_operation: dict | None = None
         self._local_present: dict[str, bool] = {}
         self._local_violations: dict[str, str] = {}
@@ -208,6 +212,7 @@ class HardwareService:
             close_timeout_seconds=float(settings.get("door_close_timeout_seconds", 120)),
             open_timeout_policy=settings.get("door_open_timeout_policy", "continue_waiting"),
             close_timeout_policy=settings.get("door_close_timeout_policy", "continue_waiting"))
+        self._load_direct_events()
         self.task: asyncio.Task | None = None
 
     @property
@@ -275,6 +280,90 @@ class HardwareService:
             LOG.exception("Could not persist direct security-event queue")
             return False
 
+    def _load_direct_events(self) -> None:
+        if self._completion_queue_file is None:
+            return
+        try:
+            rows = json.loads(self._completion_queue_file.read_text(encoding="utf-8"))
+            if not isinstance(rows, list):
+                return
+            for row in rows[-32:]:
+                snapshot = row.get("snapshot") if isinstance(row, dict) else None
+                completion = snapshot.get("local_completion") if isinstance(snapshot, dict) else None
+                if (isinstance(completion, dict) and completion.get("verified") is True
+                        and isinstance(completion.get("command_id"), str)):
+                    self._direct_events.append({"presence": None, "snapshot": snapshot,
+                                                "durable": True})
+            if self._direct_events:
+                latest = self._direct_events[-1]["snapshot"]
+                completion = latest["local_completion"]
+                operation = completion.get("operation")
+                expected = completion.get("expected_slots")
+                present = completion.get("observed_slots")
+                if (operation in {"deposit", "retrieval"}
+                        and isinstance(expected, dict) and set(expected) == PRESENCE_SLOTS
+                        and isinstance(present, dict) and set(present) == PRESENCE_SLOTS):
+                    self._local_operation = {
+                        "command_id": completion["command_id"],
+                        "workflow_id": completion.get("workflow_id"),
+                        "assigned_slot": completion.get("assigned_slot"),
+                        "kind": operation,
+                        "expected": expected,
+                        "target_present": operation == "deposit",
+                        "door": completion.get("door"),
+                        "phase": "locally_completed",
+                        "opened_at": completion.get("opened_at"),
+                        "closed_at": completion.get("closed_at"),
+                        "close_seq": completion.get("telemetry_sequence"),
+                        "close_boot_id": completion.get("esp_boot_id"),
+                    }
+                    self._local_present = present
+                    self._awaiting_backend_finalization = True
+                    self._finalization_error = "SYNCHRONIZATION_PENDING"
+                    self._last_unlock = latest.get("last_unlock")
+                self._direct_event_signal.set()
+        except (OSError, ValueError, TypeError, KeyError):
+            self._direct_events.clear()
+
+    def _save_direct_events(self) -> bool:
+        if self._completion_queue_file is None:
+            return True
+        durable = [row for row in self._direct_events if row.get("durable") is True]
+        try:
+            self._completion_queue_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            pending = self._completion_queue_file.with_suffix(
+                self._completion_queue_file.suffix + ".pending")
+            pending.write_text(json.dumps(durable[-32:], separators=(",", ":")),
+                               encoding="utf-8")
+            os.chmod(pending, 0o600)
+            os.replace(pending, self._completion_queue_file)
+            return True
+        except OSError:
+            LOG.exception("Could not persist direct completion-event queue")
+            return False
+
+    def _queue_direct_event(self, snapshot: dict, *, durable: bool = False) -> bool:
+        if len(self._direct_events) == self._direct_events.maxlen:
+            if not durable:
+                self.fault = "workflow_event_queue_full"
+                return False
+            # A verified completion must not be discarded behind transient
+            # open/close snapshots; the completion itself contains their proof.
+            removable = next((index for index, row in enumerate(self._direct_events)
+                              if row.get("durable") is not True), None)
+            if removable is None:
+                self.fault = "completion_event_queue_full"
+                return False
+            del self._direct_events[removable]
+        self._direct_events.append({"presence": None, "snapshot": snapshot,
+                                    "durable": durable})
+        if durable and not self._save_direct_events():
+            self._direct_events.pop()
+            self.fault = "completion_event_storage_unavailable"
+            return False
+        self._direct_event_signal.set()
+        return True
+
     async def execute_direct_command(self, row: dict) -> dict:
         command_id = str(row.get("id", ""))
         async with self._command_lock:
@@ -304,7 +393,7 @@ class HardwareService:
     def _grant_decode(value: str) -> bytes:
         return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
-    def _validate_unlock_grant(self, row: dict, door: str) -> None:
+    def _validate_unlock_grant(self, row: dict, door: str) -> dict:
         try:
             payload, supplied = row["grant"].split(".", 1)
             expected = base64.urlsafe_b64encode(hmac.new(
@@ -340,6 +429,7 @@ class HardwareService:
                 or claims.get("expected_slots") != expected_rows
                 or abs(expires.timestamp() - claims["exp"]) > 1):
             raise ValueError("unlock_grant_claim_mismatch")
+        return claims
 
     def _validate_direct_unlock(self, row: dict, door: str) -> None:
         if not self.ready:
@@ -386,17 +476,23 @@ class HardwareService:
         if self.door_workflow.phase not in {"idle", "completed", "fault"}:
             raise ValueError("door_workflow_busy")
 
-    def _start_local_operation(self, row: dict) -> None:
+    def _start_local_operation(self, row: dict, claims: dict | None = None) -> None:
         expected = {entry["code"]: entry["present"] for entry in row["expected_slots"]}
         assigned = row["assigned_slot"]
         initial_present = expected[assigned]
         self._local_operation = {
             "command_id": str(row["id"]),
+            "workflow_id": claims.get("workflow_id") if claims else None,
             "assigned_slot": assigned,
             "kind": "retrieval" if initial_present else "deposit",
             "expected": expected,
             "target_present": not initial_present,
             "door": "pocket" if assigned.startswith("P-") else "medium",
+            "phase": "authorized",
+            "opened_at": None,
+            "closed_at": None,
+            "close_seq": None,
+            "close_boot_id": None,
         }
         self._local_present = expected.copy()
         self._local_violations = {}
@@ -414,6 +510,12 @@ class HardwareService:
             "command_id": operation["command_id"] if operation else None,
             "assigned_slot": operation["assigned_slot"] if operation else None,
             "operation": operation["kind"] if operation else None,
+            "workflow_id": operation.get("workflow_id") if operation else None,
+            "local_phase": operation.get("phase") if operation else "idle",
+            "locally_completed": bool(
+                operation and operation.get("phase") in {"locally_completed", "synced"}),
+            "sync_pending": bool(
+                operation and operation.get("phase") == "locally_completed"),
             "provisional_success": self._local_provisional,
             "assigned_present": self._local_present.get(operation["assigned_slot"])
                 if operation else None,
@@ -445,6 +547,8 @@ class HardwareService:
         if operation is None:
             return False
         previous = self._local_violations
+        previous_provisional = self._local_provisional
+        previous_phase = operation.get("phase")
         current: dict[str, str] = {}
         assigned = operation["assigned_slot"]
         target = operation["target_present"]
@@ -474,10 +578,20 @@ class HardwareService:
             for slot, kind in current.items()
             if previous.get(slot) != kind
         )
-        changed = current != previous
+        violation_changed = current != previous
         self._local_violations = current
+        door_open = operation["door"] in self.gpio.doors and (
+            self.gpio.doors[operation["door"]].snapshot()["door"] == "open")
+        if operation.get("phase") not in {"door_closed", "locally_completed", "synced"}:
+            if self._local_provisional and not current and door_open:
+                operation["phase"] = "item_verified"
+            elif door_open:
+                operation["phase"] = "door_open"
+        changed = (violation_changed or self._local_provisional != previous_provisional
+                   or operation.get("phase") != previous_phase)
         if changed:
             self._changed()
+        if violation_changed:
             self._queue_security_updates(updates)
         return changed
 
@@ -504,10 +618,88 @@ class HardwareService:
         if changed:
             await self._refresh_guidance()
 
+    def _local_completion_evidence(self, telemetry: dict) -> tuple[dict | None, str | None]:
+        operation = self._local_operation
+        if operation is None or operation.get("phase") != "door_closed":
+            return None, "LOCAL_WORKFLOW_NOT_CLOSED"
+        door = operation["door"]
+        door_state = self.gpio.doors[door].snapshot()
+        if door_state["door"] != "closed" or door_state["raw_level"] is None:
+            return None, "DOOR_NOT_CLOSED"
+        boot_id = self.esp.boot_id
+        sequence = telemetry.get("seq")
+        if not isinstance(boot_id, str) or not boot_id or type(sequence) is not int:
+            return None, "ESP_IDENTITY_REQUIRED"
+        if (boot_id == operation.get("close_boot_id")
+                and type(operation.get("close_seq")) is int
+                and sequence <= operation["close_seq"]):
+            return None, "POST_CLOSE_SEQUENCE_REQUIRED"
+        readings = telemetry.get("slots")
+        if not isinstance(readings, list) or len(readings) != 12:
+            return None, "SENSOR_DATA_INCOMPLETE"
+        observed = {row.get("code"): row for row in readings if isinstance(row, dict)}
+        if set(observed) != PRESENCE_SLOTS:
+            return None, "SENSOR_DATA_INCOMPLETE"
+        present: dict[str, bool] = {}
+        for code, reading in observed.items():
+            if (reading.get("ready") is not True or reading.get("fault") not in {None, ""}
+                    or type(reading.get("present")) is not bool):
+                return None, "SENSOR_DATA_INCOMPLETE"
+            present[code] = reading["present"]
+        self._local_present = present
+        self._recompute_local_security()
+        expected = operation["expected"].copy()
+        expected[operation["assigned_slot"]] = operation["target_present"]
+        if present != expected or self._local_violations or not self._local_provisional:
+            return None, "LOCAL_SENSOR_STATE_INVALID"
+        return {
+            "verified": True,
+            "command_id": operation["command_id"],
+            "workflow_id": operation.get("workflow_id"),
+            "operation": operation["kind"],
+            "door": door,
+            "assigned_slot": operation["assigned_slot"],
+            "expected_slots": operation["expected"].copy(),
+            "observed_slots": present.copy(),
+            "opened_at": operation.get("opened_at"),
+            "closed_at": operation.get("closed_at"),
+            "verified_at": datetime.now(UTC).isoformat(),
+            "esp_boot_id": boot_id,
+            "telemetry_sequence": sequence,
+        }, None
+
+    async def _try_local_completion(self, telemetry: dict) -> bool:
+        evidence, error = self._local_completion_evidence(telemetry)
+        if evidence is None:
+            self._finalization_error = error
+            self._changed()
+            await self._refresh_guidance(force=True)
+            return False
+        operation = self._local_operation
+        assert operation is not None
+        self._deactivate_workflow_solenoid(operation["door"], "locally_verified_closed")
+        evidence["completed_at"] = datetime.now(UTC).isoformat()
+        operation["phase"] = "locally_completed"
+        self._awaiting_backend_finalization = True
+        self._finalization_error = "SYNCHRONIZATION_PENDING"
+        self._completion_snapshot_pending = False
+        self._boot_recovery_snapshot_pending = False
+        self._changed()
+        snapshot = self._direct_event_snapshot()
+        snapshot["local_completion"] = evidence
+        if not self._queue_direct_event(snapshot, durable=True):
+            self._finalization_error = "COMPLETION_PERSISTENCE_FAILED"
+            self._changed()
+            return False
+        await self._refresh_guidance(force=True)
+        return True
+
     async def _finish_local_operation(self) -> None:
         door = (self._local_operation or {}).get("door") or self.door_workflow.door
         if door:
-            self._deactivate_workflow_solenoid(door, "backend_finalized")
+            self._deactivate_workflow_solenoid(door, "database_synchronized")
+        if self._local_operation is not None:
+            self._local_operation["phase"] = "synced"
         self._local_operation = None
         self._local_present = {}
         self._local_violations = {}
@@ -536,6 +728,8 @@ class HardwareService:
         self.door_workflow.fail(code)
         self._awaiting_backend_finalization = False
         self._finalization_error = code.upper()
+        if self._local_operation is not None:
+            self._local_operation["phase"] = "fault"
         if self._last_unlock is not None:
             self._last_unlock["status"] = "failed"
             self._last_unlock["last_output_error"] = "hardware_failure"
@@ -550,6 +744,29 @@ class HardwareService:
         if command_id:
             entry["command_id"] = command_id
         self.events = ([entry] + self.events)[:64]
+        operation = self._local_operation
+        if operation is not None:
+            door = operation["door"]
+            if kind in {f"{door}_door_open", "workflow_door_opened"}:
+                operation["opened_at"] = operation.get("opened_at") or entry["at"]
+                operation["closed_at"] = None
+                operation["phase"] = (
+                    "item_verified" if self._local_provisional
+                    and not self._local_violations else "door_open")
+                self._completion_snapshot_pending = False
+                self._awaiting_backend_finalization = False
+                self._finalization_error = None
+            elif (kind in {f"{door}_door_closed", "workflow_door_closed"}
+                  and operation.get("opened_at") is not None
+                  and operation.get("phase") not in {"locally_completed", "synced"}):
+                operation["closed_at"] = entry["at"]
+                operation["phase"] = "door_closed"
+                telemetry = self.esp.last_telemetry or {}
+                operation["close_seq"] = telemetry.get("seq")
+                operation["close_boot_id"] = self.esp.boot_id
+                self._completion_snapshot_pending = True
+                self._awaiting_backend_finalization = False
+                self._finalization_error = "LOCAL_SENSOR_VERIFICATION_PENDING"
         if self.direct_mode and kind in {
             "workflow_door_opened", "workflow_door_closed",
             "workflow_open_timeout", "workflow_close_timeout",
@@ -557,13 +774,7 @@ class HardwareService:
             # Freeze the event-time view. In particular, the close event must
             # retain the pre-close telemetry sequence so a later ESP reading is
             # provably newer when the backend finalizes the transaction.
-            self._direct_events.append({"presence": None,
-                                        "snapshot": self._direct_event_snapshot()})
-            self._direct_event_signal.set()
-            if kind == "workflow_door_closed":
-                self._completion_snapshot_pending = True
-                self._awaiting_backend_finalization = True
-                self._finalization_error = "FINALIZATION_PENDING"
+            self._queue_direct_event(self._direct_event_snapshot())
         self._changed()
 
     def _changed(self) -> None:
@@ -622,6 +833,10 @@ class HardwareService:
         })
         self._door_state_dirty = False
         self._last_door_state_sent = time.monotonic()
+        if self.direct_mode:
+            # ESP firmware discards a closed bank's cached modes. Re-send the
+            # locally computed policy immediately when either reed changes.
+            await self._refresh_guidance(force=True)
 
     async def handle_command(self, row: dict) -> dict:
         command_id = str(row.get("id", ""))
@@ -663,8 +878,9 @@ class HardwareService:
             if action not in {"pulse_pocket", "pulse_medium"}:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
+            grant_claims = None
             if row.get("transport") == "direct":
-                self._validate_unlock_grant(row, door)
+                grant_claims = self._validate_unlock_grant(row, door)
                 self._validate_direct_unlock(row, door)
             self._last_unlock = {
                 "command_id": command_id, "target_group": door,
@@ -680,13 +896,15 @@ class HardwareService:
             self.door_workflow.start(
                 command_id, door, self.gpio.doors[door].snapshot()["door"])
             if row.get("transport") == "direct":
-                self._start_local_operation(row)
+                self._start_local_operation(row, grant_claims)
             self._last_unlock["status"] = "accepted"
             self._last_unlock["accepted_at"] = datetime.now(UTC).isoformat()
             self.event("command_accepted", command_id)
             log_event("command_accepted", command_id=command_id, door=door)
             self.door_workflow.pulsing()
             self.gpio.activate_solenoid(door)
+            if self._local_operation is not None:
+                self._local_operation["phase"] = "unlocked"
             self._last_unlock["activated_at"] = datetime.now(UTC).isoformat()
             self.event("output_activated", command_id)
             log_event("solenoid_hold", command_id=command_id, door=door,
@@ -765,6 +983,7 @@ class HardwareService:
                     next_connect = time.monotonic() + 5
                     try:
                         await asyncio.to_thread(self.esp.connect)
+                        await self.esp.send({"v": 1, "type": "identify"})
                         if not self._esp_online:
                             self._esp_online = True
                             log_event("esp_connection", state="connected", port=self.esp.port)
@@ -839,16 +1058,13 @@ class HardwareService:
                     self._changed()
                     if self.direct_mode and message["type"] == "telemetry":
                         await self._observe_local_telemetry(message)
-                    if (self.direct_mode and message["type"] == "telemetry" and (
-                            self._completion_snapshot_pending
-                            or self._boot_recovery_snapshot_pending)):
-                        self._completion_snapshot_pending = False
+                        if self._completion_snapshot_pending:
+                            await self._try_local_completion(message)
+                    if (self.direct_mode and message["type"] == "telemetry"
+                            and self._boot_recovery_snapshot_pending
+                            and not self._completion_snapshot_pending):
                         self._boot_recovery_snapshot_pending = False
-                        self._direct_events.append({
-                            "presence": None,
-                            "snapshot": self._direct_event_snapshot(),
-                        })
-                        self._direct_event_signal.set()
+                        self._queue_direct_event(self._direct_event_snapshot())
                 if message["type"] == "ping":
                     try:
                         await self.esp.send({"v": 1, "type": "pong", "seq": message.get("seq", 0),
@@ -868,6 +1084,8 @@ class HardwareService:
                 try:
                     await self.esp.send({"v": 1, "type": "ping", "seq": self._ping_seq,
                                          "uptime_ms": int(time.monotonic() * 1000)})
+                    if self.esp.boot_id is None:
+                        await self.esp.send({"v": 1, "type": "identify"})
                 except ConnectionError:
                     self.event("esp_disconnected")
             if (self.esp.last_seen and time.monotonic() - self.esp.last_seen > 10
@@ -881,12 +1099,21 @@ class HardwareService:
         """Publish only transaction/security transitions, never routine telemetry."""
         backoff = 1.0
         while True:
+            operation = self._local_operation
+            if operation is not None and operation.get("phase") not in {
+                    "locally_completed", "synced"} and self.gpio.outputs.get(
+                        f"{operation.get('door')}_solenoid", False):
+                # Physical control is entirely local. Do not introduce a
+                # backend/database dependency while a gate output is active.
+                await asyncio.sleep(0.1)
+                continue
             if not self._security_events and not self._direct_events:
                 await self._direct_event_signal.wait()
                 self._direct_event_signal.clear()
                 continue
             security_event = bool(self._security_events)
             queued = (self._security_events if security_event else self._direct_events)[0]
+            durable_completion = queued.get("durable") is True
             payload = {"snapshot": queued.get("snapshot") or self.snapshot(),
                        "presence": queued.get("presence")}
             try:
@@ -894,17 +1121,22 @@ class HardwareService:
                     request_json, self.config.backend_url, "/api/hardware/workflow-event",
                     payload, self.credential,
                 )
-                await self._apply_guidance(result.get("guidance") or {})
-                if result.get("finalized") is True or result.get("phase") == "completed":
-                    await self._finish_local_operation()
-                elif result.get("phase") == "requires_review":
-                    reason = result.get("reason") or "REVIEW_REQUIRED"
-                    self._abort_workflow("hardware_failure")
-                    self._finalization_error = reason
-                elif self._awaiting_backend_finalization:
-                    self._finalization_error = result.get("reason")
-                    self._changed()
-                if result.get("needs_fresh_snapshot"):
+                finalized = (not security_event and (
+                    result.get("finalized") is True or result.get("phase") == "completed"))
+                if not security_event:
+                    if finalized:
+                        await self._finish_local_operation()
+                    elif result.get("phase") == "requires_review":
+                        reason = result.get("reason") or "REVIEW_REQUIRED"
+                        self._abort_workflow("hardware_failure")
+                        self._finalization_error = reason
+                    elif self._awaiting_backend_finalization:
+                        self._finalization_error = (
+                            result.get("reason") or "SYNCHRONIZATION_PENDING")
+                        self._changed()
+                if (not security_event and result.get("needs_fresh_snapshot")
+                        and (self._local_operation or {}).get("phase")
+                        not in {"locally_completed", "synced"}):
                     self._completion_snapshot_pending = True
                     if self.esp.serial is not None:
                         try:
@@ -921,9 +1153,12 @@ class HardwareService:
                 if security_event:
                     self._security_events.popleft()
                     self._save_security_events()
-                else:
+                elif not durable_completion or finalized:
                     self._direct_events.popleft()
+                    self._save_direct_events()
                 backoff = 1.0
+                if durable_completion and not finalized:
+                    await asyncio.sleep(0.5)
             except Exception:
                 if self._awaiting_backend_finalization:
                     self._finalization_error = "BACKEND_UNAVAILABLE"
@@ -1087,11 +1322,26 @@ class HardwareService:
     async def _refresh_guidance(self, *, force: bool = False) -> None:
         slots = {f"P-{number:02d}" for number in range(1, 9)}
         slots.update(f"M-{number:02d}" for number in range(1, 5))
-        modes = (self._backend_guidance.copy() if self._backend_guidance is not None
-                 else {slot: "OFF" for slot in slots})
+        if self.direct_mode:
+            modes = {slot: "OFF" for slot in slots}
+            operation = self._local_operation
+            if operation is not None:
+                for slot, expected in operation["expected"].items():
+                    if expected:
+                        modes[slot] = "STEADY_ON"
+                assigned = operation["assigned_slot"]
+                assigned_present = self._local_present.get(assigned)
+                if assigned_present is operation["target_present"]:
+                    modes[assigned] = "STEADY_ON" if assigned_present else "OFF"
+                else:
+                    modes[assigned] = "NORMAL_BLINK"
+        else:
+            modes = (self._backend_guidance.copy() if self._backend_guidance is not None
+                     else {slot: "OFF" for slot in slots})
         for slot in self._local_violations:
             modes[slot] = "SOS_BLINK"
-        self._set_buzzer(self._backend_buzzer or bool(self._local_violations))
+        self._set_buzzer((self._backend_buzzer and not self.direct_mode)
+                         or bool(self._local_violations))
         if self.esp.serial is not None and (
                 force or modes != self._last_guidance or not self._last_esp_connection or
                 time.monotonic() - self._last_guidance_sent >= 5):

@@ -85,3 +85,11 @@ def test_safe_startup_is_all_off_until_fresh_reed_states_arrive():
     assert "bool doorStateArmed = false;" in source
     assert source.index("shiftAllOff();") < source.index("Serial1.begin")
     assert render(["STEADY_ON"] * 12, "unknown", "unknown") == 0
+
+
+def test_running_esp_replies_to_repeatable_boot_identity_request():
+    source = FIRMWARE.read_text(encoding="utf-8")
+    assert "void sendHello()" in source
+    assert 'if (strcmp(type, "identify") == 0) { sendHello(); return; }' in source
+    assert source.count("sendHello();") >= 2
+    assert 'hello["boot_id"] = String(bootId, HEX);' in source

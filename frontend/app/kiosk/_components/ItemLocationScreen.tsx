@@ -16,6 +16,7 @@ export default function ItemLocationScreen() {
   const section = retrieval.section === "pocket" ? "Pocket-size" : "Medium-size";
   const provisional = kiosk.hardwarePhase === "provisional_success" || kiosk.hardwarePhase === "awaiting_door_close";
   const review = kiosk.hardwarePhase === "requires_review" || kiosk.hardwarePhase === "warning_active";
+  const synchronizing = kiosk.locallyCompleted && kiosk.syncPending;
   const doorOpen = kiosk.hardwareOnline === true && kiosk.hardwareDoor === "open";
   const awaitingValidation = provisional && kiosk.hardwareOnline === true && kiosk.hardwareDoor === "closed";
   const switchDetail = kiosk.assignedPresent === null
@@ -25,10 +26,10 @@ export default function ItemLocationScreen() {
     <div className="kiosk-grid"><CompartmentMap slots={kiosk.slots} assignedCode={retrieval.slot_code} section={section} />
       <section className="kiosk-card flex flex-col p-4 sm:p-5"><span className="kiosk-pill w-fit">POSITION {retrieval.slot_code}</span>
         <div aria-hidden="true" className="mx-auto mt-2 flex h-18 items-center justify-center text-6xl text-[#149e93]">↑<span className="ml-1 text-5xl">▱</span></div>
-        <h2 className="text-[clamp(20px,2.1vw,28px)] font-bold">{review ? "Retrieval needs attention" : provisional ? "Item lifted. Close the door" : doorOpen ? "Lift only your item" : "Waiting for door unlock"}</h2><p className="text-sm text-[#53646c]">{review ? "Return any other item to its original position. SAULI will verify the cabinet before completing retrieval." : provisional ? "Close the door carefully. SAULI will verify every position before completing retrieval." : doorOpen ? <>Remove <strong>{retrieval.item_summary}</strong> from {retrieval.slot_code}. SAULI will confirm the retrieval automatically.</> : "Wait for the door sensor to confirm the door is open."}</p>
-        {!provisional && !review && <DoorUnlockNotice />}
+        <h2 className="text-[clamp(20px,2.1vw,28px)] font-bold">{review ? "Retrieval needs attention" : synchronizing ? "Door secured — synchronizing record" : provisional ? "Item lifted. Close the door" : doorOpen ? "Lift only your item" : "Waiting for door unlock"}</h2><p className="text-sm text-[#53646c]">{review ? "Return any other item to its original position. SAULI will verify the cabinet before completing retrieval." : synchronizing ? "The Pi verified all sensors and locked the door locally. SAULI is recording the completed retrieval." : provisional ? "Close the door carefully. The Pi will verify every position locally before locking it." : doorOpen ? <>Remove <strong>{retrieval.item_summary}</strong> from {retrieval.slot_code}. SAULI will confirm the retrieval automatically.</> : "Wait for the door sensor to confirm the door is open."}</p>
+        {!provisional && !review && !synchronizing && <DoorUnlockNotice />}
         <ol className="mt-3 grid gap-1 text-sm"><li><strong>1.</strong> Open the {section.toLowerCase()} door.</li><li><strong>2.</strong> Lift only your item from {retrieval.slot_code}.</li><li><strong>3.</strong> Close the door carefully.</li></ol>
-        <div className="mt-auto"><SensorStatusCard title="Removal sensor active" detail={awaitingValidation ? `${switchDetail}; waiting for backend confirmation` : switchDetail} status={kiosk.assignedPresent === kiosk.expectedPresent && kiosk.assignedPresent !== null ? "success" : "waiting"} />
+        <div className="mt-auto"><SensorStatusCard title="Removal sensor active" detail={synchronizing ? `${switchDetail}; door output is LOW, synchronizing record` : awaitingValidation ? `${switchDetail}; local post-close verification in progress` : switchDetail} status={kiosk.assignedPresent === kiosk.expectedPresent && kiosk.assignedPresent !== null ? "success" : "waiting"} />
           {kiosk.hardwareOnline === false && <p role="status" className="mt-2 text-sm text-amber-800">The hardware connection is unavailable. Keep the item in place while SAULI reconnects.</p>}
           {kiosk.hardwareError && <p role="alert" className="mt-2 text-sm text-red-700">{kiosk.hardwareError}</p>}
           {kiosk.state.error && <p role="alert" className="mt-2 text-sm text-red-700">{kiosk.state.error}</p>}

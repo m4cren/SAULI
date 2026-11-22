@@ -5,6 +5,7 @@ import { initialKioskState, kioskReducer } from "../app/kiosk/_hooks/kioskReduce
 import { initialClaimantState, claimantReducer } from "../libs/claimant/claimantReducer.ts";
 import { isAllowedKioskAction } from "../libs/api/kiosk-actions.ts";
 import { hardwareWorkflowError, isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+import { createCaptureLightQueue } from "../app/kiosk/_hooks/captureLightQueue.ts";
 
 test("kiosk waits for a completed backend placement before showing success", () => {
   const workflow = { placement_status: "reserved", phase: "provisional_success", wrong_slots: [] };
@@ -36,6 +37,31 @@ test("finalization errors are actionable and never count as success", () => {
   assert.match(hardwareWorkflowError({ ...pending, finalization_error: "BACKEND_UNAVAILABLE" }), /cannot reach the backend/i);
   assert.match(hardwareWorkflowError({ ...pending, phase: "requires_review", finalization_error: null }), /staff/i);
   assert.equal(hardwareWorkflowError({ ...pending, finalization_error: null }), null);
+});
+
+test("local completion is visible while recorded success still waits for synchronization", () => {
+  const synchronizing = {
+    placement_status: "reserved", phase: "synchronizing", wrong_slots: [],
+    locally_completed: true, sync_pending: true,
+    finalization_error: "SYNCHRONIZATION_PENDING",
+  };
+  assert.equal(hardwareWorkflowError(synchronizing), null);
+  assert.equal(isFinalizedPlacement(synchronizing), false);
+  assert.equal(isFinalizedPlacement({ ...synchronizing, placement_status: "placed",
+    phase: "completed", sync_pending: false }), true);
+  assert.match(hardwareWorkflowError({ ...synchronizing,
+    finalization_error: "BACKEND_UNAVAILABLE" }), /secured locally/i);
+});
+
+test("capture-light failures reach the caller without blocking a later safety OFF", async () => {
+  const calls = [];
+  const queueLight = createCaptureLightQueue(async (enabled) => {
+    calls.push(enabled);
+    if (enabled) throw new Error("CAPTURE_LIGHT_UNAVAILABLE");
+  });
+  await assert.rejects(queueLight(true), /CAPTURE_LIGHT_UNAVAILABLE/);
+  await queueLight(false);
+  assert.deepEqual(calls, [true, false]);
 });
 
 test("kiosk observes a committed unlock and does not show a failed command as waiting", () => {

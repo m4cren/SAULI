@@ -82,6 +82,18 @@ void sendReply(const char *type, const String &id, const char *code) {
   sendDoc(doc);
 }
 
+void sendHello() {
+  JsonDocument hello;
+  hello["v"] = 1;
+  hello["type"] = "hello";
+  hello["seq"] = ++seqNo;
+  hello["uptime_ms"] = millis();
+  hello["firmware"] = "sauli-esp-s3-0.4";
+  hello["boot_id"] = String(bootId, HEX);
+  hello["sensor_mode"] = SWITCH_MODE ? "switch" : "hx711";
+  sendDoc(hello);
+}
+
 void shiftAllOff() {
   digitalWrite(LATCH_PIN, LOW);
   shiftOut(DATA_PIN, CLOCK_PIN, MSBFIRST, 0); // IC2 (far register) first.
@@ -322,6 +334,7 @@ void handleLine(const char *line) {
     pong["seq"] = doc["seq"] | 0; pong["uptime_ms"] = millis(); sendDoc(pong);
     return;
   }
+  if (strcmp(type, "identify") == 0) { sendHello(); return; }
   if (strcmp(type, "status") == 0) { telemetry(); return; }
   if (strcmp(type, "event_ack") == 0) {
     const char *eventId = doc["event_id"] | "";
@@ -465,11 +478,7 @@ void setup() {
   Serial.printf("[BOOT] SAULI ESP32-S3 initialized; sensor mode=%s, UART=%lu baud\n",
                 SWITCH_MODE ? "switch" : "hx711", static_cast<unsigned long>(BAUD));
 #endif
-  JsonDocument hello; hello["v"] = 1; hello["type"] = "hello";
-  hello["seq"] = ++seqNo; hello["uptime_ms"] = millis();
-  hello["firmware"] = "sauli-esp-s3-0.3";
-  hello["boot_id"] = String(bootId, HEX);
-  hello["sensor_mode"] = SWITCH_MODE ? "switch" : "hx711"; sendDoc(hello);
+  sendHello();
   if (SWITCH_MODE) for (int i = 0; i < 12; ++i) publishPresence(i, "SENSOR_SNAPSHOT");
 }
 

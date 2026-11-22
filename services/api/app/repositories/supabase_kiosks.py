@@ -43,9 +43,14 @@ def merge_direct_warning(result: dict, state: dict) -> None:
     result["provisional_success"] = warning.get("provisional_success") is True
     result["awaiting_finalization"] = warning.get("awaiting_finalization") is True
     result["finalization_error"] = warning.get("finalization_error")
+    result["local_phase"] = warning.get("local_phase")
+    result["locally_completed"] = warning.get("locally_completed") is True
+    result["sync_pending"] = warning.get("sync_pending") is True
     result["wrong_slots"] = [row["slot"] for row in violations
         if isinstance(row, dict) and isinstance(row.get("slot"), str)]
-    if result["wrong_slots"]:
+    if result["locally_completed"] and result["sync_pending"]:
+        result["phase"] = "synchronizing"
+    elif result["wrong_slots"]:
         result["phase"] = "warning_active"
     elif result["awaiting_finalization"]:
         result["phase"] = "awaiting_door_close"
@@ -275,10 +280,28 @@ class SupabaseKioskRepository:
     async def rearm_unopened_hardware_review(
         self, unit_id: UUID, actor_id: UUID, reason: str,
     ) -> dict:
-        result = await self.rpc("sauli_rearm_unopened_hardware_review", {
-            "p_unit_id": str(unit_id), "p_actor_id": str(actor_id),
-            "p_reason": reason.strip(),
-        })
+        if self.hardware_transport != "legacy" and self.hardware is not None:
+            def fetch_device():
+                rows = (self.client().table("kiosk_devices").select("id")
+                    .eq("unit_id", str(unit_id)).eq("is_primary", True)
+                    .eq("status", "active").is_("revoked_at", "null")
+                    .limit(1).execute().data or [])
+                return rows[0] if rows else None
+            device = await self._read_with_retry(fetch_device, "review device")
+            if not device:
+                raise ServiceError("REVIEW_REARM_DENIED",
+                                   "The primary hardware device is unavailable.", 409)
+            snapshot = await self.hardware.state(device["id"])
+            result = await self.rpc("sauli_rearm_direct_hardware_review", {
+                "p_unit_id": str(unit_id), "p_device_id": device["id"],
+                "p_actor_id": str(actor_id), "p_reason": reason.strip(),
+                "p_snapshot": snapshot,
+            })
+        else:
+            result = await self.rpc("sauli_rearm_unopened_hardware_review", {
+                "p_unit_id": str(unit_id), "p_actor_id": str(actor_id),
+                "p_reason": reason.strip(),
+            })
         if not isinstance(result, dict) or result.get("error"):
             raise ServiceError("REVIEW_REARM_DENIED",
                                "Review could not be cleared. Check current hardware state.", 409)
@@ -363,15 +386,19 @@ class SupabaseKioskRepository:
             device, grant, workflow_id=workflow_id, operation=operation)
         if response.get("status") != "acked":
             code = response.get("code", "hardware_rejected")
+            snapshot = response.get("snapshot") or {}
+            reported = snapshot.get("last_unlock") or {}
+            if not reported.get("activated_at"):
+                await self.rpc("sauli_record_direct_unlock_result", {
+                    "p_device_id": device["id"],
+                    "p_command_id": response.get("id"),
+                    "p_status": "failed", "p_code": code,
+                })
             raise ServiceError(
                 code.upper(),
                 "The hardware rejected the unlock because it was not safe or ready.",
                 409,
             )
-        snapshot = response.get("snapshot")
-        if isinstance(snapshot, dict):
-            # This is a workflow transition, not a periodic hardware snapshot.
-            await self.hardware_workflow_event(device, snapshot, None)
         return {"command_id": response["id"], "status": "acked",
                 "code": response.get("code", "unlock_held"),
                 "unlock_grant": grant}
@@ -387,7 +414,10 @@ class SupabaseKioskRepository:
                     raise ServiceError("HARDWARE_INCIDENT_UPDATE_FAILED",
                                        "Security evidence could not be recorded.", 503)
                 return incident_result
-            result = await self.rpc("sauli_reconcile_direct_hardware_workflow", {
+            rpc_name = ("sauli_reconcile_local_hardware_completion"
+                        if (snapshot.get("local_completion") or {}).get("verified") is True
+                        else "sauli_reconcile_direct_hardware_workflow")
+            result = await self.rpc(rpc_name, {
                 "p_device_id": device["id"], "p_snapshot": snapshot,
             })
             if not isinstance(result, dict):
@@ -409,6 +439,50 @@ class SupabaseKioskRepository:
     async def hardware_workflow(self, device: dict, *, item_id: str | None,
                                 session_id: str | None) -> dict:
         direct = self.hardware_transport != "legacy"
+        requested_workflow = item_id or session_id
+        if direct and self.hardware is not None and requested_workflow:
+            try:
+                live = await self.hardware.state(device["id"])
+                warning = live.get("local_warning") or {}
+                if (warning.get("monitoring") is True
+                        and warning.get("workflow_id") == str(requested_workflow)):
+                    workflow = live.get("door_workflow") or {}
+                    door_name = workflow.get("door") or (
+                        "pocket" if str(warning.get("assigned_slot", "")).startswith("P-")
+                        else "medium")
+                    observed = ((live.get("pi") or {}).get("doors") or {}).get(
+                        door_name) or {}
+                    reported = live.get("last_unlock") or {}
+                    result = {
+                        "placement_status": "reserved" if item_id else None,
+                        "retrieval_status": "validated" if session_id else None,
+                        "wrong_slots": [], "hardware_online": True,
+                        "phase": "awaiting_door_open",
+                        "door": observed.get("door")
+                            if observed.get("door") in {"open", "closed"} else "unknown",
+                        "last_unlock": ({
+                            "status": reported.get("status"),
+                            "activated_at": reported.get("activated_at"),
+                            "deactivated_at": reported.get("deactivated_at"),
+                        } if reported else None),
+                        "unlock_command_status": "acked",
+                        "unlock_retry_available": False,
+                        "assigned_slot": warning.get("assigned_slot"),
+                        "assigned_present": warning.get("assigned_present"),
+                        "expected_present": warning.get("expected_present"),
+                        "provisional_success": warning.get("provisional_success") is True,
+                        "awaiting_finalization": warning.get("awaiting_finalization") is True,
+                        "finalization_error": warning.get("finalization_error"),
+                        "local_phase": warning.get("local_phase"),
+                        "locally_completed": warning.get("locally_completed") is True,
+                        "sync_pending": warning.get("sync_pending") is True,
+                        "_command_id": warning.get("command_id"),
+                    }
+                    merge_direct_warning(result, live)
+                    result.pop("_command_id", None)
+                    return result
+            except ServiceError:
+                pass
         def fetch():
             client = self.client()
             item = None
@@ -488,6 +562,9 @@ class SupabaseKioskRepository:
                     "provisional_success": False,
                     "awaiting_finalization": False,
                     "finalization_error": None,
+                    "local_phase": None,
+                    "locally_completed": False,
+                    "sync_pending": False,
                     "_command_id": transaction.get("command_id") if transaction else None}
         result = await self._read_with_retry(fetch, "workflow")
         if direct and self.hardware is not None:
