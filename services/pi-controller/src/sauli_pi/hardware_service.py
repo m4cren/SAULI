@@ -94,6 +94,9 @@ def load_hardware(path: Path) -> dict:
         ("telemetry_interval_seconds", 0.5, 0.25, 30),
         ("telemetry_min_gap_seconds", 0.15, 0.1, 5),
         ("capture_light_max_seconds", 12, 3, 30),
+        ("solenoid_max_hold_seconds", 300, 10, 900),
+        ("door_open_timeout_seconds", 60, 5, 300),
+        ("door_close_timeout_seconds", 120, 5, 600),
     ):
         try:
             number = float(value.get(key, default))
@@ -102,6 +105,10 @@ def load_hardware(path: Path) -> dict:
         if not minimum <= number <= maximum:
             raise ValueError(f"{key} must be between {minimum} and {maximum}")
         value[key] = number
+    for key in ("door_open_timeout_policy", "door_close_timeout_policy"):
+        value[key] = value.get(key, "continue_waiting")
+        if value[key] not in {"continue_waiting", "abort"}:
+            raise ValueError(f"{key} must be continue_waiting or abort")
     if value["telemetry_min_gap_seconds"] > value["telemetry_interval_seconds"]:
         raise ValueError("telemetry_min_gap_seconds cannot exceed telemetry_interval_seconds")
     if value.get("mode") == "real":
@@ -109,6 +116,10 @@ def load_hardware(path: Path) -> dict:
             value["device_id"] = str(UUID(value["device_id"]))
         except (KeyError, ValueError, TypeError) as exc:
             raise ValueError("Real hardware requires the enrolled device UUID") from exc
+        active_high = value.get("output_active_high") or {}
+        if (active_high.get("pocket_solenoid") is not True
+                or active_high.get("medium_solenoid") is not True):
+            raise ValueError("Pocket and medium solenoids must be configured active-HIGH")
         if value["command_transport"] == "direct":
             token = value.get("direct_api_token")
             if not isinstance(token, str) or len(token) < 32:
@@ -129,7 +140,7 @@ class HardwareService:
             simulation=settings["mode"] == "simulation",
             closed_level=settings["reed_closed_level"],
             active_high=settings["output_active_high"],
-            pulse_seconds=float(settings.get("solenoid_pulse_seconds", 0.35)),
+            max_hold_seconds=float(settings.get("solenoid_max_hold_seconds", 300)),
             allow_outputs=bool(settings.get("output_polarity_verified", False)))
         self.esp = EspLink(settings.get("esp_port", "/dev/serial0"),
                            int(settings.get("esp_baud", 115200)))
@@ -170,6 +181,8 @@ class HardwareService:
         self._local_violations: dict[str, str] = {}
         self._local_provisional_ever = False
         self._local_provisional = False
+        self._awaiting_backend_finalization = False
+        self._finalization_error: str | None = None
         self._load_security_events()
         self._backend_guidance: dict[str, str] | None = None
         self._backend_buzzer = False
@@ -185,8 +198,10 @@ class HardwareService:
         self._telemetry_seconds = float(settings.get("telemetry_interval_seconds", 0.5))
         self._min_gap_seconds = float(settings.get("telemetry_min_gap_seconds", 0.15))
         self.door_workflow = DoorWorkflow(
-            open_timeout_seconds=float(settings.get("door_open_timeout_seconds", 5)),
-            close_timeout_seconds=float(settings.get("door_close_timeout_seconds", 30)))
+            open_timeout_seconds=float(settings.get("door_open_timeout_seconds", 60)),
+            close_timeout_seconds=float(settings.get("door_close_timeout_seconds", 120)),
+            open_timeout_policy=settings.get("door_open_timeout_policy", "continue_waiting"),
+            close_timeout_policy=settings.get("door_close_timeout_policy", "continue_waiting"))
         self.task: asyncio.Task | None = None
 
     @property
@@ -319,9 +334,9 @@ class HardwareService:
         door_state = self.gpio.doors[door].snapshot()
         if door_state["door"] != "closed" or door_state["raw_level"] is None:
             raise ValueError("door_not_closed")
-        if self.gpio.outputs[f"{door}_solenoid"]:
+        if any(self.gpio.outputs[f"{name}_solenoid"] for name in ("pocket", "medium")):
             raise ValueError("hardware_not_ready")
-        if self.door_workflow.phase not in {"idle", "completed"}:
+        if self.door_workflow.phase not in {"idle", "completed", "fault"}:
             raise ValueError("door_workflow_busy")
 
     def _start_local_operation(self, row: dict) -> None:
@@ -334,11 +349,14 @@ class HardwareService:
             "kind": "retrieval" if initial_present else "deposit",
             "expected": expected,
             "target_present": not initial_present,
+            "door": "pocket" if assigned.startswith("P-") else "medium",
         }
         self._local_present = expected.copy()
         self._local_violations = {}
         self._local_provisional_ever = False
         self._local_provisional = False
+        self._awaiting_backend_finalization = False
+        self._finalization_error = None
         self._changed()
 
     def _local_warning_snapshot(self) -> dict:
@@ -350,6 +368,11 @@ class HardwareService:
             "assigned_slot": operation["assigned_slot"] if operation else None,
             "operation": operation["kind"] if operation else None,
             "provisional_success": self._local_provisional,
+            "assigned_present": self._local_present.get(operation["assigned_slot"])
+                if operation else None,
+            "expected_present": operation["target_present"] if operation else None,
+            "awaiting_finalization": self._awaiting_backend_finalization,
+            "finalization_error": self._finalization_error,
             "violations": [
                 {"slot": slot, "kind": kind}
                 for slot, kind in sorted(self._local_violations.items())
@@ -435,13 +458,42 @@ class HardwareService:
             await self._refresh_guidance()
 
     async def _finish_local_operation(self) -> None:
+        door = (self._local_operation or {}).get("door") or self.door_workflow.door
+        if door:
+            self._deactivate_workflow_solenoid(door, "backend_finalized")
         self._local_operation = None
         self._local_present = {}
         self._local_violations = {}
         self._local_provisional = False
         self._local_provisional_ever = False
+        self._awaiting_backend_finalization = False
+        self._finalization_error = None
         self._changed()
         await self._refresh_guidance()
+
+    def _deactivate_workflow_solenoid(self, door: str, reason: str) -> None:
+        if not self.gpio.deactivate_solenoid(door):
+            return
+        command_id = self.door_workflow.command_id
+        if self._last_unlock is not None and self._last_unlock.get("command_id") == command_id:
+            self._last_unlock["deactivated_at"] = datetime.now(UTC).isoformat()
+        self.event("output_deactivated", command_id)
+        log_event("solenoid_hold", command_id=command_id, door=door,
+                  gpio=GPIOController.OUTPUTS[f"{door}_solenoid"],
+                  state="deactivated", reason=reason)
+
+    def _abort_workflow(self, code: str) -> None:
+        door = self.door_workflow.door
+        if door:
+            self._deactivate_workflow_solenoid(door, code)
+        self.door_workflow.fail(code)
+        self._awaiting_backend_finalization = False
+        self._finalization_error = code.upper()
+        if self._last_unlock is not None:
+            self._last_unlock["status"] = "failed"
+            self._last_unlock["last_output_error"] = "hardware_failure"
+        self.event("command_failed", self.door_workflow.command_id)
+        self._changed()
 
     def event(self, kind: str, command_id: str | None = None) -> None:
         if kind == "esp_disconnected" and self._esp_online:
@@ -463,6 +515,8 @@ class HardwareService:
             self._direct_event_signal.set()
             if kind == "workflow_door_closed":
                 self._completion_snapshot_pending = True
+                self._awaiting_backend_finalization = True
+                self._finalization_error = "FINALIZATION_PENDING"
         self._changed()
 
     def _changed(self) -> None:
@@ -509,6 +563,8 @@ class HardwareService:
             transition = self.door_workflow.observe(observed)
             if transition:
                 self.event(transition, self.door_workflow.command_id)
+                if self.door_workflow.phase == "fault":
+                    self._abort_workflow(self.door_workflow.fault or "hardware_failure")
 
     async def _send_door_states(self) -> None:
         doors = {name: self.gpio.doors[name].snapshot()["door"]
@@ -566,7 +622,9 @@ class HardwareService:
                 "command_id": command_id, "target_group": door,
                 "status": "received", "accepted_at": None,
                 "activated_at": None, "deactivated_at": None,
-                "pulse_seconds": self.gpio.pulse_seconds, "last_output_error": None,
+                "pulse_seconds": 0.0,
+                "hold_max_seconds": self.gpio.max_hold_seconds,
+                "last_output_error": None,
             }
             test_channel = self.settings.get("solenoid_led_test_channel")
             if test_channel is not None and door != test_channel:
@@ -580,27 +638,30 @@ class HardwareService:
             self.event("command_accepted", command_id)
             log_event("command_accepted", command_id=command_id, door=door)
             self.door_workflow.pulsing()
-            def activated() -> None:
-                self._last_unlock["activated_at"] = datetime.now(UTC).isoformat()
-                self.event("output_activated", command_id)
-                log_event("solenoid_pulse", command_id=command_id, door=door,
-                          gpio=GPIOController.OUTPUTS[f"{door}_solenoid"], state="activated")
-
-            def deactivated() -> None:
-                self._last_unlock["deactivated_at"] = datetime.now(UTC).isoformat()
-                self.event("output_deactivated", command_id)
-                log_event("solenoid_pulse", command_id=command_id, door=door,
-                          gpio=GPIOController.OUTPUTS[f"{door}_solenoid"], state="deactivated")
-
-            await self.gpio.pulse(door, on_activated=activated, on_deactivated=deactivated)
-            self.door_workflow.pulse_finished()
+            self.gpio.activate_solenoid(door)
+            self._last_unlock["activated_at"] = datetime.now(UTC).isoformat()
+            self.event("output_activated", command_id)
+            log_event("solenoid_hold", command_id=command_id, door=door,
+                      gpio=GPIOController.OUTPUTS[f"{door}_solenoid"], state="activated")
+            self.door_workflow.unlock_activated()
             self._last_unlock["status"] = "completed"
             self.event("command_completed", command_id)
-            log_event("command_completed", command_id=command_id, code="pulse_completed")
-            return {"id": command_id, "status": "acked", "code": "pulse_completed"}
+            log_event("command_completed", command_id=command_id, code="unlock_held")
+            return {"id": command_id, "status": "acked", "code": "unlock_held"}
         except (KeyError, ValueError, TypeError) as exc:
             if self._last_unlock is not None and self._last_unlock["command_id"] == command_id:
                 self._last_unlock["status"] = "rejected"
+            if (self.door_workflow.command_id == command_id
+                    and self.door_workflow.phase in {"requested", "pulsing"}):
+                door = self.door_workflow.door
+                if door:
+                    self._deactivate_workflow_solenoid(door, "command_rejected")
+                self.door_workflow.fail("hardware_failure")
+                if (self._local_operation is not None
+                        and self._local_operation["command_id"] == command_id):
+                    self._local_operation = None
+                    self._local_present = {}
+                    self._local_violations = {}
             self.event("command_rejected", command_id)
             code = str(exc)
             if code not in {"expired", "device_mismatch", "simulation_mode",
@@ -619,6 +680,9 @@ class HardwareService:
                 self._last_unlock["last_output_error"] = "hardware_failure"
             if self.door_workflow.command_id == command_id:
                 self.door_workflow.fail("hardware_failure")
+                door = self.door_workflow.door
+                if door:
+                    self._deactivate_workflow_solenoid(door, "hardware_failure")
             if (self._local_operation is not None
                     and self._local_operation["command_id"] == command_id):
                 self._local_operation = None
@@ -635,6 +699,10 @@ class HardwareService:
                 self._changed()
             self.gpio.sample_inputs()
             self.record_door_changes()
+            door = self.door_workflow.door
+            if (door and self.gpio.outputs[f"{door}_solenoid"]
+                    and self.gpio.hold_limit_exceeded(door)):
+                self._abort_workflow("solenoid_hold_timeout")
             await asyncio.sleep(self._sample_seconds)
 
     async def _esp_loop(self) -> None:
@@ -780,6 +848,13 @@ class HardwareService:
                 await self._apply_guidance(result.get("guidance") or {})
                 if result.get("finalized") is True or result.get("phase") == "completed":
                     await self._finish_local_operation()
+                elif result.get("phase") == "requires_review":
+                    reason = result.get("reason") or "REVIEW_REQUIRED"
+                    self._abort_workflow("hardware_failure")
+                    self._finalization_error = reason
+                elif self._awaiting_backend_finalization:
+                    self._finalization_error = result.get("reason")
+                    self._changed()
                 if result.get("needs_fresh_snapshot"):
                     self._completion_snapshot_pending = True
                     if self.esp.serial is not None:
@@ -801,6 +876,9 @@ class HardwareService:
                     self._direct_events.popleft()
                 backoff = 1.0
             except Exception:
+                if self._awaiting_backend_finalization:
+                    self._finalization_error = "BACKEND_UNAVAILABLE"
+                    self._changed()
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 

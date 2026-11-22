@@ -1,4 +1,4 @@
-"""Observed door lifecycle after a bounded solenoid command.
+"""Observed door lifecycle after an authenticated held-solenoid command.
 
 This tracks a reed contact, not the mechanical state of the lock or an item's
 placement. A process restart intentionally forgets an unfinished workflow.
@@ -13,19 +13,26 @@ ACTIVE_PHASES = {"requested", "pulsing", "awaiting_open", "awaiting_close"}
 
 @dataclass
 class DoorWorkflow:
-    open_timeout_seconds: float = 5.0
+    open_timeout_seconds: float = 60.0
     close_timeout_seconds: float = 30.0
+    open_timeout_policy: str = "continue_waiting"
+    close_timeout_policy: str = "continue_waiting"
     command_id: str | None = None
     door: str | None = None
     phase: str = "idle"
     fault: str | None = None
     deadline: float = 0.0
+    timeout_reported: bool = False
 
     def __post_init__(self) -> None:
-        if not 1 <= self.open_timeout_seconds <= 10:
-            raise ValueError("Door open timeout must be between 1 and 10 seconds")
-        if not 5 <= self.close_timeout_seconds <= 120:
-            raise ValueError("Door close timeout must be between 5 and 120 seconds")
+        if not 1 <= self.open_timeout_seconds <= 300:
+            raise ValueError("Door open timeout must be between 1 and 300 seconds")
+        if not 5 <= self.close_timeout_seconds <= 600:
+            raise ValueError("Door close timeout must be between 5 and 600 seconds")
+        if self.open_timeout_policy not in {"continue_waiting", "abort"}:
+            raise ValueError("Invalid door open timeout policy")
+        if self.close_timeout_policy not in {"continue_waiting", "abort"}:
+            raise ValueError("Invalid door close timeout policy")
 
     def start(self, command_id: str, door: str, observed: str) -> None:
         if self.phase in ACTIVE_PHASES:
@@ -37,17 +44,22 @@ class DoorWorkflow:
         self.phase = "requested"
         self.fault = None
         self.deadline = 0.0
+        self.timeout_reported = False
 
     def pulsing(self) -> None:
         self.phase = "pulsing"
 
-    def pulse_finished(self, now: float | None = None) -> None:
-        # A reed may open while the short output pulse is still active. Keep
-        # that observed transition instead of resetting the workflow.
+    def unlock_activated(self, now: float | None = None) -> None:
+        # A reed may open immediately after activation. Keep that transition
+        # instead of resetting the workflow to awaiting_open.
         if self.phase == "awaiting_close":
             return
         self.phase = "awaiting_open"
         self.deadline = (time.monotonic() if now is None else now) + self.open_timeout_seconds
+        self.timeout_reported = False
+
+    # Compatibility for older callers/tests while deployments roll together.
+    pulse_finished = unlock_activated
 
     def fail(self, code: str) -> None:
         self.phase = "fault"
@@ -60,19 +72,30 @@ class DoorWorkflow:
             if observed == "open":
                 self.phase = "awaiting_close"
                 self.deadline = now + self.close_timeout_seconds
+                self.timeout_reported = False
                 return "workflow_door_opened"
             # The open timeout starts after the pulse ends. During the pulse
             # deadline is still zero, so a closed reed is expected.
-            if self.phase == "awaiting_open" and now >= self.deadline:
-                self.fail("door_open_timeout")
+            if (self.phase == "awaiting_open" and self.deadline > 0
+                    and now >= self.deadline and not self.timeout_reported):
+                self.timeout_reported = True
+                if self.open_timeout_policy == "abort":
+                    self.fail("door_open_timeout")
+                else:
+                    self.deadline = 0.0
                 return "workflow_open_timeout"
         elif self.phase == "awaiting_close":
             if observed == "closed":
                 self.phase = "completed"
                 self.deadline = 0.0
                 return "workflow_door_closed"
-            if now >= self.deadline:
-                self.fail("door_close_timeout")
+            if (self.deadline > 0 and now >= self.deadline
+                    and not self.timeout_reported):
+                self.timeout_reported = True
+                if self.close_timeout_policy == "abort":
+                    self.fail("door_close_timeout")
+                else:
+                    self.deadline = 0.0
                 return "workflow_close_timeout"
         return None
 

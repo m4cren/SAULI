@@ -8,6 +8,9 @@
 -- This preserves Auth users, units, all slot rows, device registrations,
 -- credentials, browser sessions, pairing audit, and Storage bucket/files.
 -- Kiosk enrollment rate counters are also preserved.
+-- Direct hardware transactions, genuine security incidents (including their
+-- correction/resolution state), legacy hardware transport rows, and routine
+-- hardware snapshots/presence rows are cleared for the selected unit(s).
 -- Remove Storage files separately through the Storage API or dashboard.
 
 begin;
@@ -52,33 +55,29 @@ create temporary table sauli_reset_browser_sessions on commit drop as
 select id, device_id, token_hash, expires_at, revoked_at
 from public.kiosk_browser_sessions;
 
-create temporary table sauli_reset_items on commit drop as
-select fi.id from public.found_items fi
-join public.sauli_units u on u.id = fi.unit_id
+create temporary table sauli_reset_units on commit drop as
+select u.id from public.sauli_units u
 where current_setting('app.sauli_reset_unit_code') = 'ALL'
   or u.unit_code = current_setting('app.sauli_reset_unit_code');
+
+create temporary table sauli_reset_items on commit drop as
+select fi.id from public.found_items fi
+where fi.unit_id in (select id from sauli_reset_units);
 
 create temporary table sauli_reset_slots on commit drop as
 select s.id from public.storage_slots s
-join public.sauli_units u on u.id = s.unit_id
-where current_setting('app.sauli_reset_unit_code') = 'ALL'
-  or u.unit_code = current_setting('app.sauli_reset_unit_code');
+where s.unit_id in (select id from sauli_reset_units);
 
 delete from public.sauli_hardware_commands where unit_id in
-  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
-   or unit_code = current_setting('app.sauli_reset_unit_code'));
+  (select id from sauli_reset_units);
 delete from public.sauli_hardware_snapshots where unit_id in
-  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
-   or unit_code = current_setting('app.sauli_reset_unit_code'));
+  (select id from sauli_reset_units);
 delete from public.sauli_hardware_review_resolutions where unit_id in
-  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
-   or unit_code = current_setting('app.sauli_reset_unit_code'));
+  (select id from sauli_reset_units);
 delete from public.sauli_hardware_transactions where unit_id in
-  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
-   or unit_code = current_setting('app.sauli_reset_unit_code'));
+  (select id from sauli_reset_units);
 delete from public.sauli_hardware_incidents where unit_id in
-  (select id from public.sauli_units where current_setting('app.sauli_reset_unit_code') = 'ALL'
-   or unit_code = current_setting('app.sauli_reset_unit_code'));
+  (select id from sauli_reset_units);
 delete from public.sauli_hardware_presence_events where slot_id in (select id from sauli_reset_slots);
 delete from public.sauli_hardware_presence where slot_id in (select id from sauli_reset_slots);
 
@@ -139,6 +138,29 @@ do $$ begin
   if exists (select 1 from sauli_reset_items i
     join public.found_items fi on fi.id = i.id) then
     raise exception 'SAULI_RESET_VERIFICATION_FAILED';
+  end if;
+  if exists (select 1 from public.sauli_hardware_commands
+      where unit_id in (select id from sauli_reset_units))
+    or exists (select 1 from public.sauli_hardware_snapshots
+      where unit_id in (select id from sauli_reset_units))
+    or exists (select 1 from public.sauli_hardware_review_resolutions
+      where unit_id in (select id from sauli_reset_units))
+    or exists (select 1 from public.sauli_hardware_transactions
+      where unit_id in (select id from sauli_reset_units))
+    or exists (select 1 from public.sauli_hardware_incidents
+      where unit_id in (select id from sauli_reset_units))
+    or exists (select 1 from public.sauli_hardware_presence_events
+      where slot_id in (select id from sauli_reset_slots))
+    or exists (select 1 from public.sauli_hardware_presence
+      where slot_id in (select id from sauli_reset_slots)) then
+    raise exception 'SAULI_RESET_HARDWARE_RECORDS_REMAIN';
+  end if;
+  if exists (select 1 from public.storage_slots
+      where id in (select id from sauli_reset_slots)
+        and (status in ('reserved','occupied')
+          or current_found_item_id is not null
+          or reserved_at is not null or occupied_at is not null)) then
+    raise exception 'SAULI_RESET_SLOT_RELEASE_FAILED';
   end if;
   if exists (select * from sauli_reset_devices except
       select id, unit_id, device_code, status, is_primary, revoked_at

@@ -203,7 +203,7 @@ def test_failed_presence_upload_does_not_starve_heartbeat_or_unlock(
     service.gpio = GPIOController(simulation=True,
                                   closed_level={"pocket": 0, "medium": 0},
                                   active_high={name: True for name in GPIOController.OUTPUTS},
-                                  pulse_seconds=0.35, allow_outputs=True)
+                                  max_hold_seconds=300, allow_outputs=True)
     service.gpio.open()
     service.gpio.set_simulated_door(door, 0)
     service.gpio.doors[door].update(0, now=time.monotonic() + 0.1)
@@ -253,13 +253,12 @@ def test_failed_presence_upload_does_not_starve_heartbeat_or_unlock(
     assert presence_attempts == 2
     assert heartbeat_counts[:2] == [1, 0]
     assert acknowledgments == [{"id": command_id, "status": "acked",
-                                "code": "pulse_completed"}]
+                                "code": "unlock_held"}]
     assert not any(service.gpio.outputs.values())
     assert service.snapshot()["last_unlock"]["status"] == "completed"
     events = hardware_log_events(hardware_caplog)
     assert [(event["gpio"], event["state"]) for event in events
-            if event["event"] == "solenoid_pulse"] == [
-                (pin, "activated"), (pin, "deactivated")]
+            if event["event"] == "solenoid_hold"] == [(pin, "activated")]
     assert "private-provider-response-never-log" not in hardware_caplog.text
 
 
@@ -313,25 +312,23 @@ def test_pi_sends_both_reed_states_to_esp_over_existing_uart(tmp_path: Path):
     assert service._door_state_dirty is False
 
 
-def test_simulated_gpio_pulse_is_bounded_and_cleans_up_on_cancel():
-    async def exercise():
-        gpio = GPIOController(simulation=True, closed_level={"pocket": 0, "medium": 0},
-                              active_high={name: True for name in GPIOController.OUTPUTS},
-                              pulse_seconds=0.1)
-        gpio.open()
-        task = asyncio.create_task(gpio.pulse("pocket"))
-        await asyncio.sleep(0.01)
-        assert gpio.outputs["pocket_solenoid"] is True
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert gpio.outputs["pocket_solenoid"] is False
-        gpio.close()
-    asyncio.run(exercise())
+def test_simulated_gpio_holds_one_solenoid_until_explicit_release():
+    gpio = GPIOController(simulation=True, closed_level={"pocket": 0, "medium": 0},
+                          active_high={name: True for name in GPIOController.OUTPUTS},
+                          max_hold_seconds=10)
+    gpio.open()
+    gpio.activate_solenoid("pocket")
+    assert gpio.outputs["pocket_solenoid"] is True
+    with pytest.raises(ValueError, match="another_solenoid_active"):
+        gpio.activate_solenoid("medium")
+    assert gpio.hold_limit_exceeded("pocket", now=time.monotonic() + 11) is True
+    assert gpio.deactivate_solenoid("pocket") is True
+    assert gpio.outputs["pocket_solenoid"] is False
+    gpio.close()
     with pytest.raises(ValueError):
         GPIOController(simulation=True, closed_level={"pocket": 0, "medium": 0},
                        active_high={name: True for name in GPIOController.OUTPUTS},
-                       pulse_seconds=2)
+                       max_hold_seconds=2)
 
 
 def test_simulation_rejects_real_command_and_expired_command(tmp_path: Path):
@@ -368,7 +365,7 @@ def test_led_test_allowlist_pulses_only_selected_solenoid(
     service.gpio = GPIOController(simulation=True,
                                   closed_level={"pocket": 0, "medium": 0},
                                   active_high={name: True for name in GPIOController.OUTPUTS},
-                                  pulse_seconds=0.05, allow_outputs=True)
+                                  max_hold_seconds=300, allow_outputs=True)
     service.gpio.open()
     service.gpio.sample_inputs()
     service.gpio.set_simulated_door(door, 0)
@@ -383,7 +380,10 @@ def test_led_test_allowlist_pulses_only_selected_solenoid(
         assert not service.gpio.outputs[f"{other_door}_solenoid"]
         accepted = await service.handle_command({"id": str(uuid4()), "device_id": device,
                                                  "action": f"pulse_{door}", "expires_at": expiry})
-        assert accepted["code"] == "pulse_completed"
+        assert accepted["code"] == "unlock_held"
+        assert service.gpio.outputs[f"{door}_solenoid"] is True
+        assert service.gpio.outputs[f"{other_door}_solenoid"] is False
+        service._abort_workflow("test_complete")
         assert not service.gpio.outputs["pocket_solenoid"]
         assert not service.gpio.outputs["medium_solenoid"]
 
@@ -393,10 +393,10 @@ def test_led_test_allowlist_pulses_only_selected_solenoid(
     assert any(event["event"] == "command_failed" and
                event["code"] == "test_channel_not_allowed" for event in events)
     assert [(event["gpio"], event["state"]) for event in events
-            if event["event"] == "solenoid_pulse"] == [
+            if event["event"] == "solenoid_hold"] == [
                 (pin, "activated"), (pin, "deactivated")]
     assert any(event["event"] == "command_completed" and
-               event["code"] == "pulse_completed" for event in events)
+               event["code"] == "unlock_held" for event in events)
 
 
 def test_main_light_and_buzzer_log_only_state_changes(tmp_path: Path, hardware_caplog):
@@ -533,17 +533,23 @@ def test_closed_reed_during_unlock_pulse_does_not_timeout():
     assert workflow.snapshot()["phase"] == "awaiting_open"
 
 
-def test_door_workflow_reports_open_and_close_timeouts():
+def test_door_workflow_reports_delays_without_blocking_late_recovery():
     workflow = DoorWorkflow(open_timeout_seconds=2, close_timeout_seconds=5)
     workflow.start(str(uuid4()), "medium", "closed")
     workflow.pulse_finished(now=10)
     assert workflow.observe("closed", now=12) == "workflow_open_timeout"
-    assert workflow.snapshot()["fault"] == "door_open_timeout"
-    workflow.start(str(uuid4()), "medium", "closed")
-    workflow.pulse_finished(now=20)
-    assert workflow.observe("open", now=21) == "workflow_door_opened"
-    assert workflow.observe("open", now=26) == "workflow_close_timeout"
-    assert workflow.snapshot()["fault"] == "door_close_timeout"
+    assert workflow.snapshot()["fault"] is None
+    assert workflow.snapshot()["phase"] == "awaiting_open"
+    assert workflow.observe("open", now=20) == "workflow_door_opened"
+    assert workflow.observe("open", now=25) == "workflow_close_timeout"
+    assert workflow.snapshot()["fault"] is None
+    assert workflow.observe("closed", now=30) == "workflow_door_closed"
+    aborting = DoorWorkflow(open_timeout_seconds=2, close_timeout_seconds=5,
+                            open_timeout_policy="abort", close_timeout_policy="abort")
+    aborting.start(str(uuid4()), "medium", "closed")
+    aborting.pulse_finished(now=10)
+    assert aborting.observe("closed", now=12) == "workflow_open_timeout"
+    assert aborting.snapshot()["fault"] == "door_open_timeout"
 
 
 def test_timing_config_rejects_invalid_values(tmp_path: Path):
@@ -593,6 +599,7 @@ def test_gpio_and_workflow_continue_during_blocked_heartbeat(monkeypatch, tmp_pa
         service.gpio.sample_inputs()
         service.record_door_changes()
         service.door_workflow.start("test-command", "pocket", "closed")
+        service.door_workflow.close_timeout_policy = "abort"
         service.door_workflow.pulse_finished()
         sampler = asyncio.create_task(service._sample_loop())
         publisher = asyncio.create_task(service._publish_loop())

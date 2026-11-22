@@ -83,7 +83,8 @@ class DoorWorkflowState(BaseModel):
     door: Literal["medium", "pocket"] | None = None
     phase: Literal["idle", "requested", "pulsing", "awaiting_open",
                    "awaiting_close", "completed", "fault"] = "idle"
-    fault: Literal["door_open_timeout", "door_close_timeout", "hardware_failure"] | None = None
+    fault: Literal["door_open_timeout", "door_close_timeout", "solenoid_hold_timeout",
+                   "hardware_failure"] | None = None
 
 
 class LastUnlockState(BaseModel):
@@ -113,6 +114,10 @@ class LocalWarningState(BaseModel):
         default=None, pattern=r"^(P-0[1-8]|M-0[1-4])$")
     operation: Literal["deposit", "retrieval"] | None = None
     provisional_success: bool = False
+    assigned_present: bool | None = None
+    expected_present: bool | None = None
+    awaiting_finalization: bool = False
+    finalization_error: str | None = Field(default=None, max_length=80)
     violations: list[LocalViolation] = Field(default_factory=list, max_length=12)
 
 

@@ -37,10 +37,18 @@ def merge_direct_warning(result: dict, state: dict) -> None:
             or warning.get("command_id") != result.get("_command_id")):
         return
     violations = warning.get("violations") or []
+    result["assigned_slot"] = warning.get("assigned_slot")
+    result["assigned_present"] = warning.get("assigned_present")
+    result["expected_present"] = warning.get("expected_present")
+    result["provisional_success"] = warning.get("provisional_success") is True
+    result["awaiting_finalization"] = warning.get("awaiting_finalization") is True
+    result["finalization_error"] = warning.get("finalization_error")
     result["wrong_slots"] = [row["slot"] for row in violations
         if isinstance(row, dict) and isinstance(row.get("slot"), str)]
     if result["wrong_slots"]:
         result["phase"] = "warning_active"
+    elif result["awaiting_finalization"]:
+        result["phase"] = "awaiting_door_close"
     elif warning.get("provisional_success") is True:
         result["phase"] = "provisional_success"
 
@@ -331,7 +339,7 @@ class SupabaseKioskRepository:
             # This is a workflow transition, not a periodic hardware snapshot.
             await self.hardware_workflow_event(device, snapshot, None)
         return {"command_id": authorization["command_id"], "status": "acked",
-                "code": response.get("code", "pulse_completed")}
+                "code": response.get("code", "unlock_held")}
 
     async def hardware_workflow_event(self, device: dict, snapshot: dict,
                                       presence: dict | None) -> dict:
@@ -439,6 +447,12 @@ class SupabaseKioskRepository:
                     "last_unlock": last_unlock,
                     "unlock_command_status": unlock_command_status,
                     "unlock_retry_available": unlock_retry_available,
+                    "assigned_slot": None,
+                    "assigned_present": None,
+                    "expected_present": None,
+                    "provisional_success": False,
+                    "awaiting_finalization": False,
+                    "finalization_error": None,
                     "_command_id": transaction.get("command_id") if transaction else None}
         result = await self._read_with_retry(fetch, "workflow")
         if direct and self.hardware is not None:

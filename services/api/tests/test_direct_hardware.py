@@ -22,6 +22,8 @@ DIRECT_MIGRATION = (Path(__file__).resolve().parents[3]
                     / "supabase/migrations/202611210001_sauli_direct_hardware_transport.sql")
 FINALIZATION_MIGRATION = (Path(__file__).resolve().parents[3]
     / "supabase/migrations/202611220001_sauli_direct_workflow_finalization.sql")
+HELD_UNLOCK_MIGRATION = (Path(__file__).resolve().parents[3]
+    / "supabase/migrations/202611220002_sauli_held_unlock_workflow.sql")
 
 
 def hardware_snapshot() -> dict:
@@ -206,6 +208,9 @@ def test_live_direct_warning_overrides_stale_database_incident_view():
     state = {"local_warning": {
         "monitoring": True, "command_id": command_id,
         "provisional_success": False,
+        "assigned_slot": "P-01", "assigned_present": False,
+        "expected_present": True, "awaiting_finalization": False,
+        "finalization_error": None,
         "violations": [
             {"slot": "P-02", "kind": "wrong_placement"},
             {"slot": "M-01", "kind": "wrong_removal"},
@@ -214,15 +219,22 @@ def test_live_direct_warning_overrides_stale_database_incident_view():
     merge_direct_warning(result, state)
     assert result["wrong_slots"] == ["P-02", "M-01"]
     assert result["phase"] == "warning_active"
+    assert result["assigned_slot"] == "P-01"
+    assert result["assigned_present"] is False
     state["local_warning"]["violations"] = []
     state["local_warning"]["provisional_success"] = True
     merge_direct_warning(result, state)
     assert result["wrong_slots"] == []
     assert result["phase"] == "provisional_success"
+    state["local_warning"]["awaiting_finalization"] = True
+    state["local_warning"]["finalization_error"] = "SENSOR_DATA_INCOMPLETE"
+    merge_direct_warning(result, state)
+    assert result["phase"] == "awaiting_door_close"
+    assert result["finalization_error"] == "SENSOR_DATA_INCOMPLETE"
 
 
 def direct_finalization_sql() -> str:
-    sql = FINALIZATION_MIGRATION.read_text(encoding="utf-8").lower()
+    sql = HELD_UNLOCK_MIGRATION.read_text(encoding="utf-8").lower()
     return sql.split(
         "create or replace function public.sauli_reconcile_direct_hardware_workflow", 1
     )[1].split("end $$;", 1)[0]
@@ -258,6 +270,8 @@ def test_direct_finalization_preserves_identity_door_and_command_guards():
     assert "v_slot.current_found_item_id is distinct from v_item.id" in body
     assert "p_snapshot #>> '{last_unlock,command_id}' = v_tx.command_id::text" in body
     assert "p_snapshot #>> '{last_unlock,status}' = 'completed'" in body
+    assert "v_deactivated_at" not in body
+    assert "array['pi','outputs',v_group || '_solenoid'] = 'true'" in body
     assert "event->>'kind'='workflow_door_opened'" in body
     assert "event->>'kind'='workflow_door_closed'" in body
     assert "unauthenticated_door_open" in body

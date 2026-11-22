@@ -4,7 +4,7 @@ import { pocketCodes, mediumCodes, slotCodes, slotTotals, isSlotCode } from "../
 import { initialKioskState, kioskReducer } from "../app/kiosk/_hooks/kioskReducer.ts";
 import { initialClaimantState, claimantReducer } from "../libs/claimant/claimantReducer.ts";
 import { isAllowedKioskAction } from "../libs/api/kiosk-actions.ts";
-import { isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+import { hardwareWorkflowError, isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
 
 test("kiosk waits for a completed backend placement before showing success", () => {
   const workflow = { placement_status: "reserved", phase: "provisional_success", wrong_slots: [] };
@@ -26,6 +26,16 @@ test("retrieval remains provisional and warnings require backend resolution", ()
   assert.equal(isResolvedWarning({ ...workflow, phase: null }), false);
   assert.equal(isResolvedWarning({ ...workflow, wrong_slots: ["P-02"] }), false);
   assert.equal(isResolvedWarning(workflow), true);
+});
+
+test("finalization errors are actionable and never count as success", () => {
+  const pending = { placement_status: "reserved", phase: "awaiting_door_close",
+    wrong_slots: [], finalization_error: "SENSOR_DATA_INCOMPLETE" };
+  assert.equal(isFinalizedPlacement(pending), false);
+  assert.match(hardwareWorkflowError(pending), /final sensor verification/i);
+  assert.match(hardwareWorkflowError({ ...pending, finalization_error: "BACKEND_UNAVAILABLE" }), /cannot reach the backend/i);
+  assert.match(hardwareWorkflowError({ ...pending, phase: "requires_review", finalization_error: null }), /staff/i);
+  assert.equal(hardwareWorkflowError({ ...pending, finalization_error: null }), null);
 });
 
 test("kiosk observes a committed unlock and does not show a failed command as waiting", () => {

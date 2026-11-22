@@ -32,7 +32,7 @@ def make_service(tmp_path, device_id: str, *, mismatch: bool = False):
     service.gpio = GPIOController(
         simulation=True, closed_level={"pocket": 0, "medium": 0},
         active_high={name: True for name in GPIOController.OUTPUTS},
-        pulse_seconds=0.05, allow_outputs=True,
+        max_hold_seconds=300, allow_outputs=True,
     )
     service.gpio.open()
     for door in ("pocket", "medium"):
@@ -86,23 +86,26 @@ async def capture_guidance(service):
 
 
 @pytest.mark.parametrize("door,pin", [("pocket", 27), ("medium", 23)])
-def test_authorized_direct_unlock_pulses_exact_gpio_once(tmp_path, door, pin):
+def test_authorized_direct_unlock_holds_exact_gpio_once(tmp_path, door, pin):
     device_id = str(uuid4())
     service, _settings = make_service(tmp_path, device_id)
-    pulses = []
-
-    async def pulse(incoming, *, on_activated, on_deactivated):
-        pulses.append((incoming, GPIOController.OUTPUTS[f"{incoming}_solenoid"]))
-        on_activated()
-        on_deactivated()
-
-    service.gpio.pulse = pulse
     payload = command(device_id, door)
-    first = asyncio.run(service.execute_direct_command(payload))
-    second = asyncio.run(service.execute_direct_command(payload))
+
+    async def exercise():
+        first = await service.execute_direct_command(payload)
+        await asyncio.sleep(0.4)
+        second = await service.execute_direct_command(payload)
+        return first, second
+
+    first, second = asyncio.run(exercise())
     assert first == second
     assert first["status"] == "acked"
-    assert pulses == [(door, pin)]
+    assert first["code"] == "unlock_held"
+    assert GPIOController.OUTPUTS[f"{door}_solenoid"] == pin
+    assert service.gpio.outputs[f"{door}_solenoid"] is True
+    other = "medium" if door == "pocket" else "pocket"
+    assert service.gpio.outputs[f"{other}_solenoid"] is False
+    assert service._last_unlock["deactivated_at"] is None
 
 
 def test_direct_endpoint_rejects_unauthenticated_command(tmp_path):
@@ -118,39 +121,51 @@ def test_direct_endpoint_rejects_unauthenticated_command(tmp_path):
 def test_direct_unlock_rejects_unsafe_sensor_state_without_pulse(tmp_path):
     device_id = str(uuid4())
     service, _settings = make_service(tmp_path, device_id, mismatch=True)
-    pulses = []
-
-    async def pulse(*_args, **_kwargs):
-        pulses.append(True)
-
-    service.gpio.pulse = pulse
     result = asyncio.run(service.execute_direct_command(command(device_id, "pocket")))
     assert result["status"] == "failed"
     assert result["code"] == "sensor_state_mismatch"
-    assert pulses == []
+    assert not service.gpio.outputs["pocket_solenoid"]
+
+
+def test_delayed_manual_open_recovers_without_releasing_gpio27(tmp_path):
+    service, _settings = make_service(tmp_path, str(uuid4()))
+    payload = command(service.settings["device_id"], "pocket")
+    assert asyncio.run(service.execute_direct_command(payload))["status"] == "acked"
+    service.door_workflow.deadline = time.monotonic() - 1
+    assert service.door_workflow.observe("closed") == "workflow_open_timeout"
+    assert service.door_workflow.phase == "awaiting_open"
+    assert service.door_workflow.fault is None
+    assert service.gpio.outputs["pocket_solenoid"] is True
+    assert service.door_workflow.observe("open") == "workflow_door_opened"
+    assert service.door_workflow.phase == "awaiting_close"
+    assert service.gpio.outputs["pocket_solenoid"] is True
 
 
 def test_local_deposit_success_is_provisional_and_reversal_warns_until_corrected(
         tmp_path):
     service, _settings = make_service(tmp_path, str(uuid4()))
     payload = command(service.settings["device_id"], "pocket")
-    service._start_local_operation(payload)
+    assert asyncio.run(service.execute_direct_command(payload))["code"] == "unlock_held"
+    assert service.gpio.outputs["pocket_solenoid"] is True
 
     async def exercise():
         sent = await capture_guidance(service)
         await service._observe_local_presence("P-01", True)
         assert service._local_warning_snapshot()["provisional_success"] is True
         assert service._local_violations == {}
+        assert service.gpio.outputs["pocket_solenoid"] is True
         await service._observe_local_presence("P-01", False)
         assert service._local_violations == {"P-01": "wrong_removal"}
         assert service.gpio.outputs["buzzer"] is True
         assert sent[-1]["modes"]["P-01"] == "SOS_BLINK"
         service.event("workflow_door_closed", payload["id"])
+        assert service.gpio.outputs["pocket_solenoid"] is True
         assert service._local_violations == {"P-01": "wrong_removal"}
         await service._observe_local_presence("P-01", True)
         assert service._local_violations == {}
         assert service.gpio.outputs["buzzer"] is False
         assert sent[-1]["modes"]["P-01"] == "OFF"
+        assert service.gpio.outputs["pocket_solenoid"] is True
 
     asyncio.run(exercise())
     updates = [row["snapshot"]["local_incident_updates"]
@@ -235,9 +250,12 @@ def test_backend_finalization_ends_local_monitor_only_after_confirmation(
         tmp_path, monkeypatch):
     service, _settings = make_service(tmp_path, str(uuid4()))
     payload = command(service.settings["device_id"], "pocket")
-    service._start_local_operation(payload)
-    service._direct_events.append({"presence": None,
-                                   "snapshot": service._direct_event_snapshot()})
+    result = asyncio.run(service.execute_direct_command(payload))
+    assert result["code"] == "unlock_held"
+    assert service.gpio.outputs["pocket_solenoid"] is True
+    service.event("workflow_door_closed", payload["id"])
+    assert service._awaiting_backend_finalization is True
+    assert service._local_warning_snapshot()["finalization_error"] == "FINALIZATION_PENDING"
     service.credential = "credential"
 
     def completed(*_args):
@@ -258,6 +276,88 @@ def test_backend_finalization_ends_local_monitor_only_after_confirmation(
 
     asyncio.run(exercise())
     assert service._local_warning_snapshot()["monitoring"] is False
+    assert service.gpio.outputs["pocket_solenoid"] is False
+    assert service._last_unlock["deactivated_at"] is not None
+
+
+def test_failed_finalization_keeps_unlock_held_and_reports_error(
+        tmp_path, monkeypatch):
+    service, _settings = make_service(tmp_path, str(uuid4()))
+    payload = command(service.settings["device_id"], "medium")
+    assert asyncio.run(service.execute_direct_command(payload))["code"] == "unlock_held"
+    service._awaiting_backend_finalization = True
+    service._direct_events.append({"presence": None,
+                                   "snapshot": service._direct_event_snapshot()})
+    service.credential = "credential"
+
+    def pending(*_args):
+        return {"phase": "awaiting_door_close", "finalized": False,
+                "reason": "SENSOR_DATA_INCOMPLETE", "guidance": {}}
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", pending)
+
+    async def exercise():
+        await capture_guidance(service)
+        task = asyncio.create_task(service._direct_event_loop())
+        try:
+            async with asyncio.timeout(1):
+                while service._direct_events:
+                    await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert service.gpio.outputs["medium_solenoid"] is True
+    assert service._local_warning_snapshot()["monitoring"] is True
+    assert service._local_warning_snapshot()["finalization_error"] == "SENSOR_DATA_INCOMPLETE"
+
+
+def test_definitive_finalization_failure_releases_output_without_false_success(
+        tmp_path, monkeypatch):
+    service, _settings = make_service(tmp_path, str(uuid4()))
+    payload = command(service.settings["device_id"], "pocket")
+    assert asyncio.run(service.execute_direct_command(payload))["status"] == "acked"
+    service.event("workflow_door_closed", payload["id"])
+    service.credential = "credential"
+
+    def rejected(*_args):
+        return {"phase": "requires_review", "finalized": False,
+                "reason": "ASSIGNED_SLOT_FINAL_STATE_MISMATCH", "guidance": {}}
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", rejected)
+
+    async def exercise():
+        await capture_guidance(service)
+        task = asyncio.create_task(service._direct_event_loop())
+        try:
+            async with asyncio.timeout(1):
+                while service._direct_events:
+                    await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert service.gpio.outputs["pocket_solenoid"] is False
+    assert service.door_workflow.phase == "fault"
+    assert service._local_warning_snapshot()["monitoring"] is True
+    assert service._local_warning_snapshot()["finalization_error"] == (
+        "ASSIGNED_SLOT_FINAL_STATE_MISMATCH")
+
+
+def test_solenoid_hold_limit_aborts_safely_and_closed_retry_can_reauthorize(tmp_path):
+    service, _settings = make_service(tmp_path, str(uuid4()))
+    payload = command(service.settings["device_id"], "pocket")
+    assert asyncio.run(service.execute_direct_command(payload))["status"] == "acked"
+    service.gpio._solenoid_started["pocket"] = time.monotonic() - 301
+    assert service.gpio.hold_limit_exceeded("pocket") is True
+    service._abort_workflow("solenoid_hold_timeout")
+    assert service.gpio.outputs["pocket_solenoid"] is False
+    assert service.door_workflow.fault == "solenoid_hold_timeout"
+    retry = command(service.settings["device_id"], "pocket")
+    assert asyncio.run(service.execute_direct_command(retry))["status"] == "acked"
+    assert service.gpio.outputs["pocket_solenoid"] is True
 
 
 def test_close_event_freezes_pre_close_telemetry_for_freshness_proof(tmp_path):

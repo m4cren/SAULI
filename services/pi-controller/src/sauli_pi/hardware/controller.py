@@ -1,6 +1,5 @@
 """Single-owner, fail-closed Pi GPIO adapter. This does not claim a lock state."""
 
-import asyncio
 import time
 from dataclasses import dataclass
 
@@ -54,10 +53,10 @@ class GPIOController:
     INPUTS = {"medium": 8, "pocket": 7}
 
     def __init__(self, *, simulation: bool, closed_level: dict[str, int],
-                 active_high: dict[str, bool], pulse_seconds: float = 0.35,
+                 active_high: dict[str, bool], max_hold_seconds: float = 300,
                  pin_factory=None, allow_outputs: bool = False):
-        if not 0.05 <= pulse_seconds <= 1.0:
-            raise ValueError("Solenoid pulse must be between 0.05 and 1 second")
+        if not 10 <= max_hold_seconds <= 900:
+            raise ValueError("Solenoid hold limit must be between 10 and 900 seconds")
         if set(closed_level) != set(self.INPUTS):
             raise ValueError("Both reed polarities must be configured")
         if (not set(self.DRIVEN_OUTPUTS).issubset(active_high)
@@ -66,14 +65,15 @@ class GPIOController:
         self.simulation = simulation
         self.closed_level = closed_level
         self.active_high = active_high
-        self.pulse_seconds = pulse_seconds
+        self.max_hold_seconds = max_hold_seconds
         self.pin_factory = pin_factory
         self.allow_outputs = allow_outputs
         self.doors = {name: DoorInput(closed_level[name]) for name in self.INPUTS}
         self.outputs = {name: False for name in self.OUTPUTS}
         self._inputs = {}
         self._outputs = {}
-        self._pulse_lock = asyncio.Lock()
+        self._solenoid_started: dict[str, float | None] = {
+            door: None for door in self.INPUTS}
 
     def open(self) -> None:
         if self.simulation:
@@ -117,33 +117,41 @@ class GPIOController:
             device.on() if enabled else device.off()
         self.outputs[name] = enabled
 
-    async def pulse(self, door: str, *, on_activated=None, on_deactivated=None) -> None:
+    def activate_solenoid(self, door: str) -> None:
         if door not in self.INPUTS:
             raise ValueError("Unknown door")
         if not self.simulation and not self.allow_outputs:
             raise ValueError("Output polarity has not been verified")
         name = f"{door}_solenoid"
-        async with self._pulse_lock:
-            activated = False
-            try:
-                if not self.simulation:
-                    self._outputs[name].on()
-                self.outputs[name] = True
-                activated = True
-                if on_activated is not None:
-                    on_activated()
-                await asyncio.sleep(self.pulse_seconds)
-            finally:
-                try:
-                    if activated and not self.simulation:
-                        self._outputs[name].off()
-                    self.outputs[name] = False
-                    if activated and on_deactivated is not None:
-                        on_deactivated()
-                except Exception:
-                    # A failed GPIO off call must not be reported as deactivated.
-                    self.outputs[name] = True
-                    raise
+        if any(self.outputs[f"{other}_solenoid"]
+               for other in self.INPUTS if other != door):
+            raise ValueError("another_solenoid_active")
+        if self.outputs[name]:
+            raise ValueError("solenoid_already_active")
+        if not self.simulation:
+            self._outputs[name].on()
+        self.outputs[name] = True
+        self._solenoid_started[door] = time.monotonic()
+
+    def deactivate_solenoid(self, door: str) -> bool:
+        if door not in self.INPUTS:
+            raise ValueError("Unknown door")
+        name = f"{door}_solenoid"
+        was_active = self.outputs[name]
+        if was_active and not self.simulation:
+            self._outputs[name].off()
+        self.outputs[name] = False
+        self._solenoid_started[door] = None
+        return was_active
+
+    def hold_limit_exceeded(self, door: str, now: float | None = None) -> bool:
+        started = self._solenoid_started.get(door)
+        return (started is not None and
+                (time.monotonic() if now is None else now) - started >= self.max_hold_seconds)
+
+    def deactivate_all_solenoids(self) -> None:
+        for door in self.INPUTS:
+            self.deactivate_solenoid(door)
 
     def snapshot(self) -> dict:
         return {"mode": "simulation" if self.simulation else "real",
@@ -152,6 +160,7 @@ class GPIOController:
                 "lock_feedback": "unavailable"}
 
     def close(self) -> None:
+        self.deactivate_all_solenoids()
         for name, device in self._outputs.items():
             device.off()
             self.outputs[name] = False
