@@ -16,10 +16,27 @@ import ProcessingScreen from "./ProcessingScreen";
 import QrResultScreen from "./QrResultScreen";
 import QrScanPanel from "./QrScanPanel";
 import StatusModal from "./StatusModal";
+import SensorFeedbackModal from "./SensorFeedbackModal";
+import { showProvisionalConfirmation } from "../_hooks/kioskUnlockStatus";
 
 export default function KioskShell() {
-  const { state } = useKiosk();
+  const kiosk = useKiosk();
+  const { state } = kiosk;
   const { screen, modal } = state;
+  const provisional = showProvisionalConfirmation({
+    hardwareOnline: kiosk.hardwareOnline,
+    hardwareDoor: kiosk.hardwareDoor,
+    hardwarePhase: kiosk.hardwarePhase,
+    assignedPresent: kiosk.assignedPresent,
+    expectedPresent: kiosk.expectedPresent,
+    locallyCompleted: kiosk.locallyCompleted,
+    syncPending: kiosk.syncPending,
+    hasBlockingWarning: Boolean(modal) || Boolean(kiosk.hardwareError),
+  });
+  const feedback = !modal && provisional && (
+    (screen.mode === "found" && screen.step === "placement" && state.assignment) ||
+    (screen.mode === "retrieve" && screen.step === "itemLocation" && state.validatedRetrieval)
+  );
   let content;
   if (screen.mode === "home") content = <HomeActions />;
   else if (screen.mode === "found") {
@@ -49,5 +66,5 @@ export default function KioskShell() {
       case "retrieved": content = <CompletionScreen kind="retrieved" />; break;
     }
   }
-  return <div className="kiosk-shell font-sans"><CircuitBackground showTop={screen.mode === "home"} /><div inert={Boolean(modal)} aria-hidden={Boolean(modal)} className="min-h-dvh">{screen.mode === "home" ? content : <main className="kiosk-main">{content}</main>}</div>{modal && <StatusModal type={modal} />}</div>;
+  return <div className="kiosk-shell font-sans"><CircuitBackground showTop={screen.mode === "home"} /><div inert={Boolean(modal || feedback)} aria-hidden={Boolean(modal || feedback)} className="min-h-dvh">{screen.mode === "home" ? content : <main className="kiosk-main">{content}</main>}</div>{modal && <StatusModal type={modal} />}{feedback && <SensorFeedbackModal kind={screen.mode === "found" ? "deposit" : "retrieval"} slotCode={screen.mode === "found" ? state.assignment!.slot_code : state.validatedRetrieval!.slot_code} />}</div>;
 }

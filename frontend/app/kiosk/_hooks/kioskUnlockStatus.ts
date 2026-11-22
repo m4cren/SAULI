@@ -55,3 +55,25 @@ export function resolveUnlockStatus(
   }
   return current;
 }
+
+/** Provisional feedback: never confuse a verified switch transition with
+ * post-close verification or a database-recorded completion. */
+export function showProvisionalConfirmation(status: {
+  hardwareOnline: boolean | null;
+  hardwareDoor: string | null;
+  hardwarePhase: string | null;
+  assignedPresent: boolean | null;
+  expectedPresent: boolean | null;
+  locallyCompleted: boolean;
+  syncPending: boolean;
+  hasBlockingWarning: boolean;
+}): boolean {
+  return status.hardwareOnline === true
+    && status.hardwareDoor === "open"
+    && status.hardwarePhase === "provisional_success"
+    && status.expectedPresent !== null
+    && status.assignedPresent === status.expectedPresent
+    && !status.locallyCompleted
+    && !status.syncPending
+    && !status.hasBlockingWarning;
+}

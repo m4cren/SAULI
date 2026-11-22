@@ -287,11 +287,19 @@ class HardwareService:
             rows = json.loads(self._completion_queue_file.read_text(encoding="utf-8"))
             if not isinstance(rows, list):
                 return
+            # A command has at most one immutable physical completion. Historical
+            # queue files can contain duplicates from repeated reed transitions.
+            seen_commands: set[str] = set()
             for row in rows[-32:]:
                 snapshot = row.get("snapshot") if isinstance(row, dict) else None
                 completion = snapshot.get("local_completion") if isinstance(snapshot, dict) else None
                 if (isinstance(completion, dict) and completion.get("verified") is True
                         and isinstance(completion.get("command_id"), str)):
+                    command_id = completion["command_id"]
+                    if command_id in seen_commands:
+                        LOG.warning("Ignoring duplicate persisted completion for command %s", command_id)
+                        continue
+                    seen_commands.add(command_id)
                     self._direct_events.append({"presence": None, "snapshot": snapshot,
                                                 "durable": True})
             if self._direct_events:
@@ -343,6 +351,16 @@ class HardwareService:
             return False
 
     def _queue_direct_event(self, snapshot: dict, *, durable: bool = False) -> bool:
+        if durable:
+            completion = snapshot.get("local_completion") or {}
+            command_id = completion.get("command_id")
+            if not isinstance(command_id, str):
+                return False
+            # Never create a second completion for the same physical operation.
+            if any((entry.get("snapshot", {}).get("local_completion") or {}).get(
+                    "command_id") == command_id for entry in self._direct_events
+                    if entry.get("durable") is True):
+                return True
         if len(self._direct_events) == self._direct_events.maxlen:
             if not durable:
                 self.fault = "workflow_event_queue_full"
@@ -687,6 +705,10 @@ class HardwareService:
         self._changed()
         snapshot = self._direct_event_snapshot()
         snapshot["local_completion"] = evidence
+        # Supersede non-durable open/close progress snapshots: they can no
+        # longer change an operation whose physical completion is immutable.
+        self._direct_events = deque((row for row in self._direct_events
+                                     if row.get("durable") is True), maxlen=128)
         if not self._queue_direct_event(snapshot, durable=True):
             self._finalization_error = "COMPLETION_PERSISTENCE_FAILED"
             self._changed()
@@ -747,7 +769,8 @@ class HardwareService:
         operation = self._local_operation
         if operation is not None:
             door = operation["door"]
-            if kind in {f"{door}_door_open", "workflow_door_opened"}:
+            if (kind in {f"{door}_door_open", "workflow_door_opened"}
+                    and operation.get("phase") not in {"locally_completed", "synced"}):
                 operation["opened_at"] = operation.get("opened_at") or entry["at"]
                 operation["closed_at"] = None
                 operation["phase"] = (
@@ -1128,8 +1151,16 @@ class HardwareService:
                         await self._finish_local_operation()
                     elif result.get("phase") == "requires_review":
                         reason = result.get("reason") or "REVIEW_REQUIRED"
-                        self._abort_workflow("hardware_failure")
-                        self._finalization_error = reason
+                        if ((self._local_operation or {}).get("phase")
+                                == "locally_completed"):
+                            # Record synchronization failure is NOT a physical
+                            # hardware failure. Preserve immutable completion
+                            # and keep the MOSFET output inactive.
+                            self._finalization_error = reason
+                            self._changed()
+                        else:
+                            self._abort_workflow("hardware_failure")
+                            self._finalization_error = reason
                     elif self._awaiting_backend_finalization:
                         self._finalization_error = (
                             result.get("reason") or "SYNCHRONIZATION_PENDING")
@@ -1156,9 +1187,13 @@ class HardwareService:
                 elif not durable_completion or finalized:
                     self._direct_events.popleft()
                     self._save_direct_events()
-                backoff = 1.0
                 if durable_completion and not finalized:
-                    await asyncio.sleep(0.5)
+                    # Back off terminal/review responses rather than retrying
+                    # the same immutable record twice per second forever.
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
+                else:
+                    backoff = 1.0
             except Exception:
                 if self._awaiting_backend_finalization:
                     self._finalization_error = "BACKEND_UNAVAILABLE"

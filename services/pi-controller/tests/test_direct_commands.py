@@ -680,3 +680,75 @@ def test_direct_workflow_events_are_delivered_in_frozen_fifo_order(
     assert delivered[0]["events"][0]["kind"] == "workflow_door_opened"
     assert delivered[1]["events"][0]["kind"] == "workflow_door_closed"
 
+
+
+def test_reopened_reed_after_local_completion_never_generates_second_record(tmp_path):
+    service, _settings = make_service(tmp_path, str(uuid4()))
+    payload = command(service.settings["device_id"], "pocket")
+    assert asyncio.run(service.execute_direct_command(payload))["status"] == "acked"
+    set_door(service, "pocket", "open")
+
+    async def complete():
+        await service._observe_local_presence("P-01", True)
+        set_door(service, "pocket", "closed")
+        telemetry = final_telemetry(service, payload, seq=2)
+        assert await service._try_local_completion(telemetry)
+        return [row for row in service._direct_events if row.get("durable")]
+
+    rows = asyncio.run(complete())
+    assert len(rows) == 1
+    original = rows[0]["snapshot"]["local_completion"]
+    assert service.gpio.outputs["pocket_solenoid"] is False
+    assert service._last_unlock["status"] == "completed"
+    assert service._local_operation["phase"] == "locally_completed"
+    set_door(service, "pocket", "open")
+    set_door(service, "pocket", "closed")
+    assert service._local_operation["phase"] == "locally_completed"
+    assert service._completion_snapshot_pending is False
+    assert len([row for row in service._direct_events if row.get("durable")]) == 1
+    assert not service._queue_direct_event(rows[0]["snapshot"], durable=True) is False
+    assert len([row for row in service._direct_events if row.get("durable")]) == 1
+    assert service._direct_events[0]["snapshot"]["local_completion"] == original
+    assert len(json.loads(service._completion_queue_file.read_text())) == 1
+
+
+def test_review_response_preserves_proven_local_completion_and_gate_low(tmp_path, monkeypatch):
+    service, _settings = make_service(tmp_path, str(uuid4()))
+    payload = command(service.settings["device_id"], "pocket")
+    assert asyncio.run(service.execute_direct_command(payload))["status"] == "acked"
+    set_door(service, "pocket", "open")
+
+    async def complete():
+        await service._observe_local_presence("P-01", True)
+        set_door(service, "pocket", "closed")
+        telemetry = final_telemetry(service, payload, seq=3)
+        assert await service._try_local_completion(telemetry)
+
+    asyncio.run(complete())
+    service.credential = "credential"
+    results = []
+
+    def review(*_args):
+        results.append(True)
+        return {"phase": "requires_review", "finalized": False,
+                "reason": "TRANSACTION_NOT_FOUND"}
+
+    monkeypatch.setattr("sauli_pi.hardware_service.request_json", review)
+
+    async def exercise():
+        task = asyncio.create_task(service._direct_event_loop())
+        try:
+            async with asyncio.timeout(1):
+                while service._finalization_error != "TRANSACTION_NOT_FOUND":
+                    await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+    assert results
+    assert service.gpio.outputs["pocket_solenoid"] is False
+    assert service._local_operation["phase"] == "locally_completed"
+    assert service._last_unlock["status"] == "completed"
+    assert service.door_workflow.phase == "completed"
+    assert len(json.loads(service._completion_queue_file.read_text())) == 1
