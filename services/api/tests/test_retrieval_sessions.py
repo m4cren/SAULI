@@ -372,7 +372,7 @@ def test_pc_retrieval_api_path_releases_slot_and_rejects_rescan():
     class Kiosks:
         calls = 0
 
-        async def enqueue_workflow_unlock(self, _kiosk, *, session_id):
+        async def enqueue_workflow_unlock(self, _kiosk, *, session_id, **_options):
             assert session_id
             self.calls += 1
             return {"status": "pending"}
@@ -458,7 +458,7 @@ def test_validated_qr_survives_unlock_transport_failure():
     app.dependency_overrides[get_current_user] = lambda: UserResponse(id=str(uuid4()), name="Claimant")
 
     class Kiosks:
-        async def enqueue_workflow_unlock(self, _kiosk, *, session_id):
+        async def enqueue_workflow_unlock(self, _kiosk, *, session_id, **_options):
             assert session_id
             raise OSError("transport unavailable")
 

@@ -286,7 +286,9 @@ class SupabaseKioskRepository:
 
     async def enqueue_workflow_unlock(self, device: dict, *,
                                       item_id: str | None = None,
-                                      session_id: str | None = None) -> dict:
+                                      session_id: str | None = None,
+                                      grant: str | None = None,
+                                      authorize_only: bool = False) -> dict:
         if self.hardware_transport == "legacy":
             result = await self.rpc("sauli_queue_workflow_unlock", {
                 "p_device_id": device["id"], "p_item_id": item_id,
@@ -299,36 +301,68 @@ class SupabaseKioskRepository:
                 raise ServiceError("UNLOCK_FAILED", "The unlock signal failed. Ask an operator to check the door.", 503)
             return result
 
-        authorization = await self.rpc("sauli_authorize_workflow_unlock", {
-            "p_device_id": device["id"], "p_item_id": item_id,
-            "p_session_id": session_id,
-        })
-        if not isinstance(authorization, dict) or authorization.get("error"):
-            code = authorization.get("error", "HARDWARE_UNAVAILABLE") if isinstance(authorization, dict) else "HARDWARE_UNAVAILABLE"
-            raise ServiceError(code, "The door could not be requested. Check the hardware and try again.", 503)
         if self.hardware is None:
             raise ServiceError("HARDWARE_UNAVAILABLE", "Direct hardware transport is unavailable.", 503)
-        command = {
-            "id": authorization["command_id"],
-            "device_id": device["id"],
-            "action": authorization["action"],
-            "expires_at": authorization["expires_at"],
-            "assigned_slot": authorization["assigned_slot"],
-            "expected_slots": authorization["expected_slots"],
-            "transport": "direct",
-        }
-        response = await self.hardware.command(device["id"], command)
+        workflow_id = item_id or session_id
+        operation = "deposit" if item_id else "retrieval"
+        if workflow_id is None or (item_id is None) == (session_id is None):
+            raise ServiceError("INVALID_WORKFLOW", "Select one authorized workflow.", 422)
+        authorization = None
+        if grant is None:
+            authorization_params = {
+                "p_device_id": device["id"], "p_item_id": item_id,
+                "p_session_id": session_id,
+            }
+            authorization = await self.rpc(
+                "sauli_authorize_workflow_unlock", authorization_params)
+            recovery_snapshot = None
+            recovery_required = (isinstance(authorization, dict)
+                                 and authorization.get("error") == "WORKFLOW_REQUIRES_REVIEW")
+            if isinstance(authorization, dict) and not authorization.get("error"):
+                recovery_snapshot = await self.hardware.state(device["id"])
+                workflow = recovery_snapshot.get("door_workflow") or {}
+                recovery_required = (
+                    workflow.get("phase") == "fault"
+                    and workflow.get("fault") == "door_open_timeout"
+                    and workflow.get("command_id") == str(authorization.get("command_id"))
+                )
+            if recovery_required:
+                # The only automatic recovery is an unopened legacy timeout.
+                # State comes from the authenticated private Pi endpoint and
+                # the SQL function independently validates the DB workflow,
+                # both closed reeds, inactive outputs, and all 12 sensors.
+                if recovery_snapshot is None:
+                    recovery_snapshot = await self.hardware.state(device["id"])
+                recovery = await self.rpc(
+                    "sauli_recover_direct_unopened_workflow", {
+                        **authorization_params, "p_snapshot": recovery_snapshot,
+                    })
+                if not isinstance(recovery, dict) or recovery.get("error"):
+                    recovery_code = (recovery.get("error")
+                                     if isinstance(recovery, dict)
+                                     else "RECOVERY_NOT_ELIGIBLE")
+                    raise ServiceError(
+                        f"WORKFLOW_{recovery_code}",
+                        "The previous unlock requires a verified operator review before retrying.",
+                        409,
+                    )
+                authorization = await self.rpc(
+                    "sauli_authorize_workflow_unlock", authorization_params)
+            if not isinstance(authorization, dict) or authorization.get("error"):
+                code = authorization.get("error", "HARDWARE_UNAVAILABLE") if isinstance(authorization, dict) else "HARDWARE_UNAVAILABLE"
+                status = 409 if code in {"WORKFLOW_NOT_READY", "WORKFLOW_BUSY",
+                                         "WORKFLOW_REQUIRES_REVIEW", "HARDWARE_NOT_READY"} else 503
+                raise ServiceError(code,
+                    "The workflow is not ready for a new unlock authorization.", status)
+            grant = self.hardware.issue_unlock_grant(
+                device, authorization, workflow_id=workflow_id, operation=operation)
+            if authorize_only:
+                return {"command_id": authorization["command_id"],
+                        "status": "authorized", "unlock_grant": grant}
+        response = await self.hardware.command_from_grant(
+            device, grant, workflow_id=workflow_id, operation=operation)
         if response.get("status") != "acked":
             code = response.get("code", "hardware_rejected")
-            # A definitive, pre-pulse rejection may be given a new command ID
-            # after the operator corrects the unsafe state. Network failures are
-            # deliberately not recorded because execution would be ambiguous.
-            await self.rpc("sauli_record_direct_unlock_result", {
-                "p_device_id": device["id"],
-                "p_command_id": authorization["command_id"],
-                "p_status": "failed",
-                "p_code": code,
-            })
             raise ServiceError(
                 code.upper(),
                 "The hardware rejected the unlock because it was not safe or ready.",
@@ -338,8 +372,9 @@ class SupabaseKioskRepository:
         if isinstance(snapshot, dict):
             # This is a workflow transition, not a periodic hardware snapshot.
             await self.hardware_workflow_event(device, snapshot, None)
-        return {"command_id": authorization["command_id"], "status": "acked",
-                "code": response.get("code", "unlock_held")}
+        return {"command_id": response["id"], "status": "acked",
+                "code": response.get("code", "unlock_held"),
+                "unlock_grant": grant}
 
     async def hardware_workflow_event(self, device: dict, snapshot: dict,
                                       presence: dict | None) -> dict:

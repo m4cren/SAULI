@@ -557,7 +557,9 @@ def test_unlock_retry_routes_forward_the_correct_kiosk_identity():
         async def browser_session(self, _token):
             return None
 
-        async def enqueue_workflow_unlock(self, incoming, *, item_id=None, session_id=None):
+        async def enqueue_workflow_unlock(
+            self, incoming, *, item_id=None, session_id=None, **_options,
+        ):
             calls.append((incoming, item_id, session_id))
             return {"status": "pending"}
 
@@ -567,6 +569,10 @@ def test_unlock_retry_routes_forward_the_correct_kiosk_identity():
     with TestClient(app) as client:
         assert client.post(f"/api/found-items/{item_id}/request-unlock").status_code in (401, 403)
         app.dependency_overrides[get_kiosk_session] = lambda: kiosk
-        assert client.post(f"/api/found-items/{item_id}/request-unlock").json() == {"status": "pending"}
-        assert client.post(f"/api/retrieval-sessions/{session_id}/request-unlock").json() == {"status": "pending"}
+        assert client.post(f"/api/found-items/{item_id}/request-unlock").json() == {
+            "status": "pending", "unlock_grant": None,
+        }
+        assert client.post(f"/api/retrieval-sessions/{session_id}/request-unlock").json() == {
+            "status": "pending", "unlock_grant": None,
+        }
     assert calls == [(kiosk, item_id, None), (kiosk, None, session_id)]

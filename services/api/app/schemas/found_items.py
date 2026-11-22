@@ -113,6 +113,11 @@ class ConfirmedItemResponse(StrictModel):
     slot_status: Literal["reserved", "occupied"]
     placement_status: Literal["reserved", "placed"]
     unlock_status: Literal["queued", "unavailable"] = "queued"
+    unlock_grant: str | None = Field(default=None, max_length=8192)
+
+
+class UnlockRequest(StrictModel):
+    unlock_grant: str | None = Field(default=None, min_length=80, max_length=8192)
 
 
 class SimulatePlacementRequest(StrictModel):

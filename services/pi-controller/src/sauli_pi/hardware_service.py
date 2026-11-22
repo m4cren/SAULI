@@ -2,6 +2,9 @@
 
 import argparse
 import asyncio
+import base64
+import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -43,6 +46,9 @@ class DirectCommand(BaseModel):
     transport: Literal["direct"]
     assigned_slot: str | None = Field(default=None, pattern=r"^(P-0[1-8]|M-0[1-4])$")
     expected_slots: list[ExpectedSlot] | None = Field(default=None, max_length=12)
+    # Unlocks require this signed capability. Authenticated capture-light
+    # commands are not door operations and remain backward compatible.
+    grant: str | None = Field(default=None, min_length=80, max_length=8192)
 
 
 def configure_logging() -> None:
@@ -293,6 +299,47 @@ class HardwareService:
                 self._command_results.pop(next(iter(self._command_results)))
             self._save_replay_results()
             return result
+
+    @staticmethod
+    def _grant_decode(value: str) -> bytes:
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+    def _validate_unlock_grant(self, row: dict, door: str) -> None:
+        try:
+            payload, supplied = row["grant"].split(".", 1)
+            expected = base64.urlsafe_b64encode(hmac.new(
+                self.settings["direct_api_token"].encode("utf-8"),
+                payload.encode("ascii"), hashlib.sha256).digest()
+            ).rstrip(b"=").decode("ascii")
+            if not hmac.compare_digest(supplied, expected):
+                raise ValueError("invalid_unlock_grant")
+            claims = json.loads(self._grant_decode(payload))
+            UUID(claims["jti"])
+            UUID(claims["device_id"])
+            UUID(claims["unit_id"])
+            UUID(claims["workflow_id"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, binascii.Error) as exc:
+            raise ValueError("invalid_unlock_grant") from exc
+        now = int(datetime.now(UTC).timestamp())
+        if (claims.get("v") != 1 or type(claims.get("iat")) is not int
+                or type(claims.get("exp")) is not int):
+            raise ValueError("invalid_unlock_grant")
+        if claims["exp"] <= now or claims["iat"] > now + 5:
+            raise ValueError("unlock_grant_expired")
+        expected_rows = row.get("expected_slots")
+        assigned = row.get("assigned_slot")
+        operation = "retrieval" if next(
+            (entry["present"] for entry in expected_rows or []
+             if entry.get("code") == assigned), False) else "deposit"
+        expires = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if (claims["jti"] != str(row.get("id"))
+                or claims["device_id"] != str(self.settings.get("device_id"))
+                or claims.get("door") != door
+                or claims.get("slot") != assigned
+                or claims.get("operation") != operation
+                or claims.get("expected_slots") != expected_rows
+                or abs(expires.timestamp() - claims["exp"]) > 1):
+            raise ValueError("unlock_grant_claim_mismatch")
 
     def _validate_direct_unlock(self, row: dict, door: str) -> None:
         if not self.ready:
@@ -617,6 +664,7 @@ class HardwareService:
                 raise ValueError("unsupported_action")
             door = action.removeprefix("pulse_")
             if row.get("transport") == "direct":
+                self._validate_unlock_grant(row, door)
                 self._validate_direct_unlock(row, door)
             self._last_unlock = {
                 "command_id": command_id, "target_group": door,
@@ -668,7 +716,8 @@ class HardwareService:
                             "actuators_disabled", "outputs_unverified", "unsupported_action",
                             "test_channel_not_allowed",
                             "door_workflow_busy", "door_not_closed", "hardware_not_ready",
-                            "sensor_state_mismatch"}:
+                            "sensor_state_mismatch", "invalid_unlock_grant",
+                            "unlock_grant_expired", "unlock_grant_claim_mismatch"}:
                 code = "invalid_command"
             log_event("command_failed", command_id=command_id, code=code)
             return {"id": command_id, "status": "failed", "code": code}

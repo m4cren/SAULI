@@ -68,6 +68,7 @@ class ValidatedRetrievalResponse(RetrievalModel):
     slot_status: Literal["occupied"]
     action_token: str
     unlock_status: Literal["queued", "unavailable"] = "queued"
+    unlock_grant: str | None = Field(default=None, max_length=8192)
 
 
 class SimulatedRetrievalResponse(RetrievalModel):

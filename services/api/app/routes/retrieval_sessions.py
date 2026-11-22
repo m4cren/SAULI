@@ -10,6 +10,7 @@ from app.auth.dependencies import get_admin_user, get_current_user
 from app.auth.kiosk import get_kiosk_session
 from app.core.errors import ServiceError
 from app.schemas.auth import UserResponse
+from app.schemas.found_items import UnlockRequest
 from app.schemas.retrieval_sessions import (
     CreateRetrievalRequest,
     IssuedRetrievalResponse,
@@ -60,9 +61,11 @@ async def validate_qr(request: Request, payload: ValidateQrRequest,
         request.app.state.items, request.app.state.settings, payload.qr_payload, UUID(kiosk["unit_id"])
     )
     try:
-        await request.app.state.kiosks.enqueue_workflow_unlock(
-            kiosk, session_id=str(result["id"]))
-        return {**result, "unlock_status": "queued"}
+        authorized = await request.app.state.kiosks.enqueue_workflow_unlock(
+            kiosk, session_id=str(result["id"]),
+            authorize_only=request.app.state.settings.hardware_transport == "direct")
+        return {**result, "unlock_status": "queued",
+                "unlock_grant": authorized.get("unlock_grant")}
     except Exception:
         log.warning("Validated retrieval unlock unavailable", extra={"session_id": str(result["id"])})
         return {**result, "unlock_status": "unavailable"}
@@ -72,10 +75,12 @@ async def validate_qr(request: Request, payload: ValidateQrRequest,
 async def retry_retrieval_unlock(
     request: Request, session_id: UUID,
     kiosk: Annotated[dict, Depends(get_kiosk_session)],
+    payload: UnlockRequest | None = None,
 ):
     result = await request.app.state.kiosks.enqueue_workflow_unlock(
-        kiosk, session_id=str(session_id))
-    return {"status": result["status"]}
+        kiosk, session_id=str(session_id),
+        grant=payload.unlock_grant if payload else None)
+    return {"status": result["status"], "unlock_grant": result.get("unlock_grant")}
 
 
 @router.get("/admin/logs", response_model=list[RetrievalLogResponse])

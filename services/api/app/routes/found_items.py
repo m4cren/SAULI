@@ -12,7 +12,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from app.core.errors import ServiceError
 from app.auth.kiosk import get_kiosk_session
 from app.schemas.found_items import (AnalysisResponse, ConfirmedItemResponse, FoundItemDetailsResponse, SimulatePlacementRequest,
-                                      ReconcileRequest, normalize_location_notes, strict_analysis_json)
+                                      ReconcileRequest, UnlockRequest, normalize_location_notes, strict_analysis_json)
 from app.services.analysis import analyze, reconcile, safe_analysis
 from app.services.found_items import confirm_item, public_details
 from app.services.images import read_upload
@@ -83,8 +83,13 @@ async def confirm_and_store(request: Request, kiosk: Kiosk, front_image: UploadF
         result = confirmed(existing, slot)
         if result.placement_status == "reserved":
             try:
-                await request.app.state.kiosks.enqueue_workflow_unlock(
-                    kiosk, item_id=str(result.item_id))
+                authorized = await request.app.state.kiosks.enqueue_workflow_unlock(
+                    kiosk, item_id=str(result.item_id),
+                    authorize_only=request.app.state.settings.hardware_transport == "direct")
+                if authorized.get("unlock_grant"):
+                    return result.model_copy(update={
+                        "unlock_status": "queued",
+                        "unlock_grant": authorized["unlock_grant"]})
             except Exception:
                 log.warning("Stored item unlock unavailable", extra={"item_id": str(result.item_id)})
                 return result.model_copy(update={"unlock_status": "unavailable"})
@@ -100,8 +105,13 @@ async def confirm_and_store(request: Request, kiosk: Kiosk, front_image: UploadF
     result = await confirm_item(request.app.state.items, key, front, back, location, normalized_notes, analysis, storage_size, UUID(kiosk["unit_id"]))
     if result.placement_status == "reserved":
         try:
-            await request.app.state.kiosks.enqueue_workflow_unlock(
-                kiosk, item_id=str(result.item_id))
+            authorized = await request.app.state.kiosks.enqueue_workflow_unlock(
+                kiosk, item_id=str(result.item_id),
+                authorize_only=request.app.state.settings.hardware_transport == "direct")
+            if authorized.get("unlock_grant"):
+                return result.model_copy(update={
+                    "unlock_status": "queued",
+                    "unlock_grant": authorized["unlock_grant"]})
         except Exception:
             log.warning("Stored item unlock unavailable", extra={"item_id": str(result.item_id)})
             return result.model_copy(update={"unlock_status": "unavailable"})
@@ -109,10 +119,12 @@ async def confirm_and_store(request: Request, kiosk: Kiosk, front_image: UploadF
 
 
 @router.post("/{item_id}/request-unlock")
-async def retry_placement_unlock(request: Request, item_id: UUID, kiosk: Kiosk):
+async def retry_placement_unlock(request: Request, item_id: UUID, kiosk: Kiosk,
+                                 payload: UnlockRequest | None = None):
     result = await request.app.state.kiosks.enqueue_workflow_unlock(
-        kiosk, item_id=str(item_id))
-    return {"status": result["status"]}
+        kiosk, item_id=str(item_id),
+        grant=payload.unlock_grant if payload else None)
+    return {"status": result["status"], "unlock_grant": result.get("unlock_grant")}
 
 
 @router.post("/{item_id}/simulate-placement", response_model=ConfirmedItemResponse)

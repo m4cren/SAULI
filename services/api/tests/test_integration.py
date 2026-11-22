@@ -347,7 +347,7 @@ def test_confirm_and_store_route_accepts_reviewed_analysis():
     class Kiosks:
         calls = 0
 
-        async def enqueue_workflow_unlock(self, _kiosk, *, item_id):
+        async def enqueue_workflow_unlock(self, _kiosk, *, item_id, **_options):
             assert item_id
             self.calls += 1
             return {"status": "pending"}
@@ -379,7 +379,7 @@ def test_confirmed_item_survives_unlock_transport_failure():
     app.state.items = repo
 
     class Kiosks:
-        async def enqueue_workflow_unlock(self, _kiosk, *, item_id):
+        async def enqueue_workflow_unlock(self, _kiosk, *, item_id, **_options):
             assert item_id
             raise OSError("transport unavailable")
 

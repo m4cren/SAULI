@@ -234,8 +234,15 @@ function useKioskFlow() {
       clearImage("front"); clearImage("back");
       files.current = { front: null, back: null };
       setAnalysis(null);
-      setUnlockStatus(assigned.unlock_status);
-      dispatch({ type: "FOUND_CONFIRMED", assignment: assigned });
+      let unlock = assigned.unlock_status;
+      if (assigned.unlock_grant) {
+        try {
+          const delivered = await requestFoundUnlock(assigned.item_id, assigned.unlock_grant);
+          unlock = ["pending", "claimed", "acked"].includes(delivered.status) ? "queued" : "unavailable";
+        } catch { unlock = "unavailable"; }
+      }
+      setUnlockStatus(unlock);
+      dispatch({ type: "FOUND_CONFIRMED", assignment: { ...assigned, unlock_status: unlock } });
     } catch (error) {
       if (error instanceof SauliApiError && error.code === "NO_AVAILABLE_STORAGE_SLOT") dispatch({ type: "NO_SLOTS", size: error.requestedSize ?? state.storageSize });
       else dispatch({ type: "SET_ERROR", message: error instanceof Error ? error.message : "The item could not be saved." });
@@ -266,8 +273,15 @@ function useKioskFlow() {
       const retrieval = await validateRetrievalQr(payload);
       clearImage("qr");
       qrFile.current = null;
-      setUnlockStatus(retrieval.unlock_status);
-      dispatch({ type: "QR_VALID", retrieval });
+      let unlock = retrieval.unlock_status;
+      if (retrieval.unlock_grant) {
+        try {
+          const delivered = await requestRetrievalUnlock(retrieval.id, retrieval.unlock_grant);
+          unlock = ["pending", "claimed", "acked"].includes(delivered.status) ? "queued" : "unavailable";
+        } catch { unlock = "unavailable"; }
+      }
+      setUnlockStatus(unlock);
+      dispatch({ type: "QR_VALID", retrieval: { ...retrieval, unlock_status: unlock } });
     } catch (cause) {
       dispatch({ type: "QR_INVALID", message: cause instanceof Error ? cause.message : "The QR could not be verified.",
         code: cause instanceof SauliApiError ? cause.code : undefined });
@@ -301,7 +315,9 @@ function useKioskFlow() {
     if (!assignment && !retrieval) return;
     setBusy(true);
     try {
-      const result = assignment ? await requestFoundUnlock(assignment.item_id) : await requestRetrievalUnlock(retrieval!.id);
+      const result = assignment
+        ? await requestFoundUnlock(assignment.item_id, assignment.unlock_grant)
+        : await requestRetrievalUnlock(retrieval!.id, retrieval!.unlock_grant);
       if (["pending", "claimed", "acked"].includes(result.status)) setUnlockStatus("queued");
     } catch (cause) {
       dispatch({ type: "SET_ERROR", message: cause instanceof Error ? cause.message : "The door could not be requested. Please ask staff for help." });

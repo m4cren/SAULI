@@ -1,6 +1,10 @@
 """Mocked GPIO proof for authenticated direct command delivery."""
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -61,10 +65,11 @@ def make_service(tmp_path, device_id: str, *, mismatch: bool = False):
 
 
 def command(device_id: str, door: str) -> dict:
-    return {
+    expires = int((datetime.now(UTC) + timedelta(seconds=60)).timestamp())
+    result = {
         "id": str(uuid4()), "device_id": device_id,
         "action": f"pulse_{door}",
-        "expires_at": (datetime.now(UTC) + timedelta(seconds=10)).isoformat(),
+        "expires_at": datetime.fromtimestamp(expires, UTC).isoformat(),
         "transport": "direct",
         "assigned_slot": "P-01" if door == "pocket" else "M-01",
         "expected_slots": [
@@ -73,6 +78,33 @@ def command(device_id: str, door: str) -> dict:
             {"code": f"M-{number:02d}", "present": False} for number in range(1, 5)
         ],
     }
+    claims = {
+        "v": 1, "jti": result["id"], "device_id": device_id,
+        "unit_id": str(uuid4()), "workflow_id": str(uuid4()),
+        "operation": "deposit", "door": door,
+        "slot": result["assigned_slot"],
+        "expected_slots": result["expected_slots"],
+        "iat": int(datetime.now(UTC).timestamp()), "exp": expires,
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(
+        claims, sort_keys=True, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    signature = base64.urlsafe_b64encode(hmac.new(
+        TOKEN.encode(), encoded.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
+    result["grant"] = f"{encoded}.{signature}"
+    return result
+
+
+def rewrite_grant(payload: dict, **changes) -> dict:
+    """Return a command whose grant is validly signed with changed claims."""
+    encoded, _signature = payload["grant"].split(".", 1)
+    claims = json.loads(base64.urlsafe_b64decode(
+        encoded + "=" * (-len(encoded) % 4)))
+    claims.update(changes)
+    encoded = base64.urlsafe_b64encode(json.dumps(
+        claims, sort_keys=True, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    signature = base64.urlsafe_b64encode(hmac.new(
+        TOKEN.encode(), encoded.encode(), hashlib.sha256).digest()).rstrip(b"=").decode()
+    return {**payload, "grant": f"{encoded}.{signature}"}
 
 
 async def capture_guidance(service):
@@ -125,6 +157,37 @@ def test_direct_unlock_rejects_unsafe_sensor_state_without_pulse(tmp_path):
     assert result["status"] == "failed"
     assert result["code"] == "sensor_state_mismatch"
     assert not service.gpio.outputs["pocket_solenoid"]
+
+
+@pytest.mark.parametrize(
+    "mutation,expected_code",
+    [
+        ("invalid_signature", "invalid_unlock_grant"),
+        ("expired", "unlock_grant_expired"),
+        ("wrong_device", "unlock_grant_claim_mismatch"),
+        ("wrong_door", "unlock_grant_claim_mismatch"),
+    ],
+)
+def test_pi_rejects_invalid_unlock_grants_without_gpio(tmp_path, mutation, expected_code):
+    device_id = str(uuid4())
+    service, _settings = make_service(tmp_path, device_id)
+    payload = command(device_id, "pocket")
+    if mutation == "invalid_signature":
+        payload["grant"] = payload["grant"][:-1] + (
+            "A" if payload["grant"][-1] != "A" else "B")
+    elif mutation == "expired":
+        payload = rewrite_grant(payload, exp=int(datetime.now(UTC).timestamp()) - 1)
+    elif mutation == "wrong_device":
+        payload = rewrite_grant(payload, device_id=str(uuid4()))
+    else:
+        payload = rewrite_grant(payload, door="medium")
+
+    result = asyncio.run(service.execute_direct_command(payload))
+
+    assert result["status"] == "failed"
+    assert result["code"] == expected_code
+    assert service.gpio.outputs["pocket_solenoid"] is False
+    assert service.gpio.outputs["medium_solenoid"] is False
 
 
 def test_delayed_manual_open_recovers_without_releasing_gpio27(tmp_path):

@@ -75,6 +75,7 @@ class Settings(BaseSettings):
         default_factory=dict, repr=False
     )
     hardware_direct_timeout_seconds: float = Field(default=4, gt=0, le=15)
+    hardware_unlock_grant_ttl_seconds: int = Field(default=90, ge=15, le=300)
 
     @model_validator(mode="after")
     def require_production_retrieval_pepper(self) -> "Settings":

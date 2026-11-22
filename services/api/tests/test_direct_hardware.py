@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.auth.kiosk import get_device
 from app.config import Settings
 from app.core.errors import ServiceError
+from app.integrations.direct_hardware import DirectHardwareGateway
 from app.main import create_app
 from app.repositories.supabase_kiosks import (
     SupabaseKioskRepository,
@@ -24,6 +25,8 @@ FINALIZATION_MIGRATION = (Path(__file__).resolve().parents[3]
     / "supabase/migrations/202611220001_sauli_direct_workflow_finalization.sql")
 HELD_UNLOCK_MIGRATION = (Path(__file__).resolve().parents[3]
     / "supabase/migrations/202611220002_sauli_held_unlock_workflow.sql")
+RECOVERY_MIGRATION = (Path(__file__).resolve().parents[3]
+    / "supabase/migrations/202611220003_sauli_direct_unlock_recovery.sql")
 
 
 def hardware_snapshot() -> dict:
@@ -49,14 +52,24 @@ def test_direct_unlock_uses_authorization_rpc_and_never_command_queue(action):
     device_id, unit_id, command_id = (str(uuid4()) for _ in range(3))
     assigned = "P-01" if action == "pulse_pocket" else "M-01"
     calls = []
+    issued_grant = "signed-grant." + "x" * 100
 
     class Hardware:
-        async def command(self, incoming_device_id, command):
+        async def state(self, incoming_device_id):
             assert incoming_device_id == device_id
-            assert command["action"] == action
-            assert command["transport"] == "direct"
-            assert len(command["expected_slots"]) == 12
-            return {"id": command["id"], "status": "acked",
+            return {"door_workflow": {"phase": "idle"}}
+
+        def issue_unlock_grant(self, incoming_device, authorization, **context):
+            assert incoming_device["id"] == device_id
+            assert authorization["action"] == action
+            assert context["operation"] == "deposit"
+            return issued_grant
+
+        async def command_from_grant(self, incoming_device, grant, **context):
+            assert incoming_device["id"] == device_id
+            assert grant == issued_grant
+            assert context["operation"] == "deposit"
+            return {"id": command_id, "status": "acked",
                     "code": "pulse_completed"}
 
     repository = SupabaseKioskRepository(
@@ -80,17 +93,25 @@ def test_direct_unlock_uses_authorization_rpc_and_never_command_queue(action):
     result = asyncio.run(repository.enqueue_workflow_unlock(
         {"id": device_id, "unit_id": unit_id}, item_id=str(uuid4())))
     assert result == {"command_id": command_id, "status": "acked",
-                      "code": "pulse_completed"}
+                      "code": "pulse_completed", "unlock_grant": issued_grant}
     assert [name for name, _ in calls] == ["sauli_authorize_workflow_unlock"]
 
 
-def test_direct_rejection_is_secure_and_records_definitive_failure():
+def test_direct_rejection_is_secure_without_post_authorization_database_write():
     device_id, unit_id, command_id = (str(uuid4()) for _ in range(3))
     calls = []
+    issued_grant = "signed-grant." + "x" * 100
 
     class Hardware:
-        async def command(self, _device_id, command):
-            return {"id": command["id"], "status": "failed",
+        async def state(self, _device_id):
+            return {"door_workflow": {"phase": "idle"}}
+
+        def issue_unlock_grant(self, _device, _authorization, **_context):
+            return issued_grant
+
+        async def command_from_grant(self, _device, grant, **_context):
+            assert grant == issued_grant
+            return {"id": command_id, "status": "failed",
                     "code": "sensor_state_mismatch"}
 
     repository = SupabaseKioskRepository(
@@ -104,9 +125,7 @@ def test_direct_rejection_is_secure_and_records_definitive_failure():
                 "assigned_slot": "P-01", "expected_slots": [],
                 "expires_at": (datetime.now(UTC) + timedelta(seconds=10)).isoformat(),
             }
-        assert name == "sauli_record_direct_unlock_result"
-        assert params["p_code"] == "sensor_state_mismatch"
-        return True
+        raise AssertionError(f"Unlock delivery must not call {name}")
 
     repository.rpc = rpc
     with pytest.raises(ServiceError) as error:
@@ -114,8 +133,280 @@ def test_direct_rejection_is_secure_and_records_definitive_failure():
             {"id": device_id, "unit_id": unit_id}, item_id=str(uuid4())))
     assert error.value.code == "SENSOR_STATE_MISMATCH"
     assert error.value.status_code == 409
-    assert calls == ["sauli_authorize_workflow_unlock",
-                     "sauli_record_direct_unlock_result"]
+    assert calls == ["sauli_authorize_workflow_unlock"]
+
+
+def test_previously_authorized_grant_unlocks_without_supabase_round_trip():
+    device_id, unit_id, workflow_id, command_id = (str(uuid4()) for _ in range(4))
+    issued_grant = "signed-grant." + "x" * 100
+
+    class Hardware:
+        async def command_from_grant(self, device, grant, **context):
+            assert device == {"id": device_id, "unit_id": unit_id}
+            assert grant == issued_grant
+            assert context == {"workflow_id": workflow_id, "operation": "deposit"}
+            return {"id": command_id, "status": "acked", "code": "unlock_held"}
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+
+    async def forbidden_rpc(name, _params):
+        raise AssertionError(f"Authorized unlock must not call Supabase RPC {name}")
+
+    repository.rpc = forbidden_rpc
+    result = asyncio.run(repository.enqueue_workflow_unlock(
+        {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
+        grant=issued_grant))
+    assert result == {"command_id": command_id, "status": "acked",
+                      "code": "unlock_held", "unlock_grant": issued_grant}
+
+
+def test_supabase_outage_after_unlock_never_returns_false_success():
+    device_id, unit_id, workflow_id, command_id = (str(uuid4()) for _ in range(4))
+    issued_grant = "signed-grant." + "x" * 100
+    delivered = []
+
+    class Hardware:
+        async def command_from_grant(self, _device, grant, **_context):
+            delivered.append(grant)
+            return {"id": command_id, "status": "acked", "code": "unlock_held",
+                    "snapshot": hardware_snapshot()}
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+
+    async def unavailable(_name, _params):
+        raise ServiceError("DATABASE_UNAVAILABLE", "Database unavailable.", 503)
+
+    repository.rpc = unavailable
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(repository.enqueue_workflow_unlock(
+            {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
+            grant=issued_grant))
+    assert error.value.code == "DATABASE_UNAVAILABLE"
+    assert delivered == [issued_grant]
+
+
+def test_original_review_409_recovers_only_after_authenticated_pi_reconciliation():
+    device_id, unit_id, workflow_id, command_id = (str(uuid4()) for _ in range(4))
+    calls = []
+    signed = "signed-grant." + "x" * 100
+    snapshot = {"authenticated": "fresh-pi-state"}
+
+    class Hardware:
+        async def state(self, incoming_device_id):
+            assert incoming_device_id == device_id
+            calls.append("authenticated_pi_state")
+            return snapshot
+
+        def issue_unlock_grant(self, device, authorization, **context):
+            assert device["id"] == device_id
+            assert authorization["command_id"] == command_id
+            assert context == {"workflow_id": workflow_id, "operation": "deposit"}
+            return signed
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+    authorizations = iter([
+        {"error": "WORKFLOW_REQUIRES_REVIEW"},
+        {
+            "command_id": command_id, "status": "authorized",
+            "action": "pulse_pocket", "assigned_slot": "P-01",
+            "expected_slots": [{"code": f"P-{n:02d}", "present": False}
+                               for n in range(1, 9)] +
+                              [{"code": f"M-{n:02d}", "present": False}
+                               for n in range(1, 5)],
+        },
+    ])
+
+    async def rpc(name, params):
+        calls.append(name)
+        if name == "sauli_authorize_workflow_unlock":
+            return next(authorizations)
+        assert name == "sauli_recover_direct_unopened_workflow"
+        assert params["p_device_id"] == device_id
+        assert params["p_item_id"] == workflow_id
+        assert params["p_snapshot"] == snapshot
+        return {"status": "recovered", "resolution_id": str(uuid4())}
+
+    repository.rpc = rpc
+    result = asyncio.run(repository.enqueue_workflow_unlock(
+        {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
+        authorize_only=True))
+    assert result == {"command_id": command_id, "status": "authorized",
+                      "unlock_grant": signed}
+    assert calls == ["sauli_authorize_workflow_unlock", "authenticated_pi_state",
+                     "sauli_recover_direct_unopened_workflow",
+                     "sauli_authorize_workflow_unlock"]
+
+
+def test_old_timeout_command_is_rearmed_with_a_new_id_instead_of_replayed():
+    device_id, unit_id, workflow_id, old_command_id, new_command_id = (
+        str(uuid4()) for _ in range(5))
+    signed = "signed-grant." + "x" * 100
+    calls = []
+
+    class Hardware:
+        async def state(self, _device_id):
+            calls.append("authenticated_pi_state")
+            return {"door_workflow": {
+                "phase": "fault", "fault": "door_open_timeout",
+                "command_id": old_command_id,
+            }}
+
+        def issue_unlock_grant(self, _device, authorization, **_context):
+            assert authorization["command_id"] == new_command_id
+            return signed
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+    authorizations = iter([
+        {
+            "command_id": old_command_id, "status": "authorized",
+            "action": "pulse_pocket", "assigned_slot": "P-01",
+            "expected_slots": [],
+        },
+        {
+            "command_id": new_command_id, "status": "authorized",
+            "action": "pulse_pocket", "assigned_slot": "P-01",
+            "expected_slots": [],
+        },
+    ])
+
+    async def rpc(name, _params):
+        calls.append(name)
+        if name == "sauli_authorize_workflow_unlock":
+            return next(authorizations)
+        assert name == "sauli_recover_direct_unopened_workflow"
+        return {"status": "recovered", "resolution_id": str(uuid4())}
+
+    repository.rpc = rpc
+    result = asyncio.run(repository.enqueue_workflow_unlock(
+        {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
+        authorize_only=True))
+    assert result["command_id"] == new_command_id
+    assert result["unlock_grant"] == signed
+    assert calls == ["sauli_authorize_workflow_unlock", "authenticated_pi_state",
+                     "sauli_recover_direct_unopened_workflow",
+                     "sauli_authorize_workflow_unlock"]
+
+
+def test_faulted_workflow_stays_blocked_when_authenticated_recovery_is_unsafe():
+    device_id, unit_id, workflow_id = (str(uuid4()) for _ in range(3))
+
+    class Hardware:
+        async def state(self, _device_id):
+            return {"pi": {"doors": {"pocket": {"door": "open"}}}}
+
+    repository = SupabaseKioskRepository(
+        None, hardware=Hardware(), hardware_transport="direct")
+
+    async def rpc(name, _params):
+        if name == "sauli_authorize_workflow_unlock":
+            return {"error": "WORKFLOW_REQUIRES_REVIEW"}
+        assert name == "sauli_recover_direct_unopened_workflow"
+        return {"error": "HARDWARE_NOT_SAFE"}
+
+    repository.rpc = rpc
+    with pytest.raises(ServiceError) as error:
+        asyncio.run(repository.enqueue_workflow_unlock(
+            {"id": device_id, "unit_id": unit_id}, item_id=workflow_id,
+            authorize_only=True))
+    assert error.value.code == "WORKFLOW_HARDWARE_NOT_SAFE"
+    assert error.value.status_code == 409
+
+
+def _gateway_fixture():
+    device_id, unit_id, workflow_id, command_id = (str(uuid4()) for _ in range(4))
+    token = "test-direct-hardware-token-" + "x" * 32
+    gateway = DirectHardwareGateway(Settings(
+        supabase_url=None, supabase_service_role_key=None, emailjs_enabled=False,
+        hardware_direct_devices={device_id: {
+            "url": "http://127.0.0.1:8787", "token": token,
+        }},
+    ))
+    device = {"id": device_id, "unit_id": unit_id}
+    authorization = {
+        "command_id": command_id, "action": "pulse_pocket", "assigned_slot": "P-01",
+        "expected_slots": [
+            {"code": f"P-{number:02d}", "present": False} for number in range(1, 9)
+        ] + [
+            {"code": f"M-{number:02d}", "present": False} for number in range(1, 5)
+        ],
+    }
+    return gateway, device, workflow_id, authorization
+
+
+def test_unlock_grant_rejects_invalid_wrong_device_wrong_door_and_replay(monkeypatch):
+    gateway, device, workflow_id, authorization = _gateway_fixture()
+    grant = gateway.issue_unlock_grant(
+        device, authorization, workflow_id=workflow_id, operation="deposit")
+    try:
+        with pytest.raises(ServiceError) as invalid:
+            gateway.verify_unlock_grant(
+                device, grant[:-1] + ("A" if grant[-1] != "A" else "B"),
+                workflow_id=workflow_id, operation="deposit")
+        assert invalid.value.code == "INVALID_UNLOCK_GRANT"
+
+        wrong_device = {"id": device["id"], "unit_id": str(uuid4())}
+        with pytest.raises(ServiceError) as mismatch:
+            gateway.verify_unlock_grant(
+                wrong_device, grant, workflow_id=workflow_id, operation="deposit")
+        assert mismatch.value.code == "UNLOCK_GRANT_DEVICE_MISMATCH"
+
+        invalid_door_authorization = {**authorization, "action": "pulse_medium"}
+        invalid_door = gateway.issue_unlock_grant(
+            device, invalid_door_authorization,
+            workflow_id=workflow_id, operation="deposit")
+        with pytest.raises(ServiceError) as door_error:
+            gateway.verify_unlock_grant(
+                device, invalid_door, workflow_id=workflow_id, operation="deposit")
+        assert door_error.value.code == "INVALID_UNLOCK_GRANT"
+
+        gateway.verify_unlock_grant(
+            device, grant, workflow_id=workflow_id, operation="deposit", consume=True)
+        with pytest.raises(ServiceError) as replay:
+            gateway.verify_unlock_grant(
+                device, grant, workflow_id=workflow_id, operation="deposit", consume=True)
+        assert replay.value.code == "UNLOCK_GRANT_REPLAYED"
+    finally:
+        asyncio.run(gateway.close())
+
+
+def test_unlock_grant_rejects_expiry_and_wrong_workflow(monkeypatch):
+    gateway, device, workflow_id, authorization = _gateway_fixture()
+    grant = gateway.issue_unlock_grant(
+        device, authorization, workflow_id=workflow_id, operation="deposit")
+    try:
+        with pytest.raises(ServiceError) as workflow_error:
+            gateway.verify_unlock_grant(
+                device, grant, workflow_id=str(uuid4()), operation="deposit")
+        assert workflow_error.value.code == "UNLOCK_GRANT_WORKFLOW_MISMATCH"
+
+        import app.integrations.direct_hardware as direct_hardware_module
+        monkeypatch.setattr(
+            direct_hardware_module.time, "time",
+            lambda: datetime.now(UTC).timestamp() + 301)
+        with pytest.raises(ServiceError) as expired:
+            gateway.verify_unlock_grant(
+                device, grant, workflow_id=workflow_id, operation="deposit")
+        assert expired.value.code == "UNLOCK_GRANT_EXPIRED"
+    finally:
+        asyncio.run(gateway.close())
+
+
+def test_direct_timeout_recovery_sql_requires_fresh_authenticated_safe_state():
+    sql = RECOVERY_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "sauli_recover_direct_unopened_workflow" in sql
+    assert "door_open_timeout" in sql
+    assert "opened_at is not null" in sql
+    assert "p_snapshot #>> '{pi,doors,pocket,door}' is distinct from 'closed'" in sql
+    assert "p_snapshot #>> '{pi,doors,medium,door}' is distinct from 'closed'" in sql
+    assert "p_snapshot #>> '{pi,outputs,pocket_solenoid}' is distinct from 'false'" in sql
+    assert "p_snapshot #>> '{pi,outputs,medium_solenoid}' is distinct from 'false'" in sql
+    assert "jsonb_array_length(p_snapshot #> '{esp,telemetry,slots}') <> 12" in sql
+    assert "sauli_hardware_review_resolutions" in sql
+    assert "insert into public.sauli_hardware_commands" not in sql
 
 
 def test_direct_mode_never_claims_supabase_commands_from_heartbeat():
