@@ -104,6 +104,30 @@ test("wrong retrieval returns to location without completing", () => {
   assert.equal(state.screen.step, "retrieved");
 });
 
+test("retrieval completes on QR verified screen without requiring Show item location", () => {
+  let state = move(initialKioskState, { type: "START_RETRIEVE" });
+  state = move(state, { type: "QR_CHECK_STARTED" });
+  state = move(state, { type: "QR_VALID", retrieval: { id: "session-1", status: "validated", item_summary: "Wallet", slot_code: "P-01", section: "pocket", slot_status: "occupied", action_token: "test" } });
+  assert.equal(state.screen.step, "qrVerified");
+  state = move(state, { type: "CORRECT_ITEM" });
+  assert.equal(state.screen.step, "retrieved");
+  assert.equal(state.validatedRetrieval, null);
+});
+
+test("wrong compartment is reported even before opening item location screen", () => {
+  let state = move(initialKioskState, { type: "START_RETRIEVE" });
+  state = move(state, { type: "QR_CHECK_STARTED" });
+  state = move(state, { type: "QR_VALID", retrieval: { id: "session-1", status: "validated", item_summary: "Wallet", slot_code: "P-01", section: "pocket", slot_status: "occupied", action_token: "test" } });
+  state = move(state, { type: "WRONG_ITEM", slot: "P-02" });
+  assert.equal(state.modal, "wrongItem");
+  assert.equal(state.wrongSlot, "P-02");
+  state = move(state, { type: "CORRECT_ITEM" });
+  assert.equal(state.screen.step, "qrVerified");
+  state = move(state, { type: "WRONG_ITEM_RETURNED" });
+  state = move(state, { type: "CORRECT_ITEM" });
+  assert.equal(state.screen.step, "retrieved");
+});
+
 test("invalid QR can be retried and reset clears images", () => {
   let state = move(initialKioskState, { type: "START_RETRIEVE" });
   state = move(state, { type: "QR_CHECK_STARTED" });

@@ -4,7 +4,7 @@ import { pocketCodes, mediumCodes, slotCodes, slotTotals, isSlotCode } from "../
 import { initialKioskState, kioskReducer } from "../app/kiosk/_hooks/kioskReducer.ts";
 import { initialClaimantState, claimantReducer } from "../libs/claimant/claimantReducer.ts";
 import { isAllowedKioskAction } from "../libs/api/kiosk-actions.ts";
-import { hardwareWorkflowError, isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
+import { hardwareWorkflowError, isFinalizedPlacement, isFinalizedRetrieval, isResolvedWarning, resolveUnlockStatus, showProvisionalConfirmation } from "../app/kiosk/_hooks/kioskUnlockStatus.ts";
 import { createCaptureLightQueue } from "../app/kiosk/_hooks/captureLightQueue.ts";
 
 test("kiosk waits for a completed backend placement before showing success", () => {
@@ -144,4 +144,38 @@ test("admin totals change when a polled slot changes state", () => {
   assert.deepEqual(slotTotals(first), { total: 4, available: 1, reserved: 1, occupied: 1, out_of_service: 1, unavailable: 2 });
   assert.deepEqual(slotTotals([{ status: "occupied" }, ...first.slice(1), { status: "occupied", is_active: false }]),
     { total: 4, available: 0, reserved: 1, occupied: 2, out_of_service: 1, unavailable: 2 });
+});
+
+test("correct open-door placement shows provisional popup; warnings take precedence", () => {
+  const valid = { hardwareOnline: true, hardwareDoor: "open",
+    hardwarePhase: "provisional_success", assignedPresent: true,
+    expectedPresent: true, locallyCompleted: false, syncPending: false,
+    hasBlockingWarning: false };
+  assert.equal(showProvisionalConfirmation(valid), true);
+  assert.equal(showProvisionalConfirmation({ ...valid, hasBlockingWarning: true }), false);
+  assert.equal(showProvisionalConfirmation({ ...valid, hardwarePhase: "warning_active" }), false);
+  assert.equal(showProvisionalConfirmation({ ...valid, assignedPresent: false }), false);
+  assert.equal(showProvisionalConfirmation({ ...valid, hardwareDoor: "closed" }), false);
+  assert.equal(showProvisionalConfirmation({ ...valid, locallyCompleted: true }), false);
+  assert.equal(showProvisionalConfirmation({ ...valid, syncPending: true }), false);
+  assert.equal(showProvisionalConfirmation({ ...valid, expectedPresent: false,
+    assignedPresent: false }), true);
+});
+
+test("an unrelated slot change replaces provisional confirmation with warning, then restores it", () => {
+  const observed = { hardwareOnline: true, hardwareDoor: "open",
+    hardwarePhase: "provisional_success", assignedPresent: true,
+    expectedPresent: true, locallyCompleted: false, syncPending: false,
+    hasBlockingWarning: false };
+  let state = { ...initialKioskState,
+    screen: { mode: "found", step: "placement" }, assignment: assigned };
+  assert.equal(showProvisionalConfirmation(observed), true);
+  state = kioskReducer(state, { type: "WRONG_PLACEMENT", slot: "M-01" });
+  assert.equal(state.modal, "wrongPlacement");
+  assert.equal(showProvisionalConfirmation({ ...observed,
+    hasBlockingWarning: Boolean(state.modal) }), false);
+  state = kioskReducer(state, { type: "WRONG_PLACEMENT_REMOVED" });
+  assert.equal(state.modal, null);
+  assert.equal(showProvisionalConfirmation({ ...observed,
+    hasBlockingWarning: Boolean(state.modal) }), true);
 });

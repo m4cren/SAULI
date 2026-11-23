@@ -100,9 +100,9 @@ export function kioskReducer(state: KioskState, action: KioskAction): KioskState
     case "QR_INVALID": return screen.mode === "retrieve" && screen.step === "verifyingQr" ? { ...state, screen: { mode: "retrieve", step: "invalidQr" }, error: action.message, qrErrorCode: action.code ?? null } : state;
     case "TRY_ANOTHER_QR": return screen.mode === "retrieve" && screen.step === "invalidQr" ? { ...state, screen: { mode: "retrieve", step: "uploadQr" }, images: { ...state.images, qr: null }, error: null, qrErrorCode: null } : state;
     case "SHOW_ITEM_LOCATION": return screen.mode === "retrieve" && screen.step === "qrVerified" ? { ...state, screen: { mode: "retrieve", step: "itemLocation" } } : state;
-    case "WRONG_ITEM": return screen.mode === "retrieve" && screen.step === "itemLocation" && !modal ? { ...state, modal: "wrongItem", wrongSlot: action.slot ?? null } : state;
+    case "WRONG_ITEM": return screen.mode === "retrieve" && (screen.step === "qrVerified" || screen.step === "itemLocation") && !modal ? { ...state, modal: "wrongItem", wrongSlot: action.slot ?? null } : state;
     case "WRONG_ITEM_RETURNED": return modal === "wrongItem" ? { ...state, modal: null, wrongSlot: null } : state;
-    case "CORRECT_ITEM": return screen.mode === "retrieve" && screen.step === "itemLocation" && !modal ? { ...state, screen: { mode: "retrieve", step: "retrieved" }, validatedRetrieval: null } : state;
+    case "CORRECT_ITEM": return screen.mode === "retrieve" && (screen.step === "qrVerified" || screen.step === "itemLocation") && !modal ? { ...state, screen: { mode: "retrieve", step: "retrieved" }, validatedRetrieval: null } : state;
     case "CANCEL_REQUESTED": return screen.mode !== "home" && !modal ? { ...state, modal: "cancel" } : state;
     case "CANCEL_STAY": return modal === "cancel" ? { ...state, modal: null } : state;
   }

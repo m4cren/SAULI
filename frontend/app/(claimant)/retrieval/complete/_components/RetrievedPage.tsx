@@ -15,16 +15,10 @@ export default function RetrievedPage() {
 
   if (session?.status !== "completed") return <main className="client-content" role="status">Opening your retrieval receipt…</main>;
 
-  const subtitle = session.slotCode
-    ? `The sensor detected that ${session.itemSummary} was lifted from compartment ${session.slotCode}.`
-    : "The station recorded that your item was retrieved.";
-
   return <>
     <ClientHero
       align="center"
-      eyebrow="WEIGHT CHANGE DETECTED"
       title="Item retrieved"
-      subtitle={subtitle}
       icon={<div className="mx-auto flex size-20 items-center justify-center rounded-full bg-[#dff9f4] text-[#0d9d98] shadow-[0_0_24px_rgba(31,214,195,0.45)]"><Icon name="check" size={48} /></div>}
     />
     <main className="client-content client-overlap space-y-4 pb-8">
