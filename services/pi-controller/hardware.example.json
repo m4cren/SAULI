@@ -1,5 +1,6 @@
 {
   "mode": "simulation",
+  "sensor_simulation_enabled": false,
   "device_id": "REPLACE-WITH-REGISTERED-DEVICE-UUID",
   "command_transport": "direct",
   "direct_api_token": "REPLACE-WITH-THE-SAME-32-PLUS-CHARACTER-API-TOKEN",

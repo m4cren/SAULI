@@ -4,7 +4,7 @@ const allowedKioskActions = [
   /^storage-slots\/availability$/,
   /^retrieval-sessions\/validate$/,
   /^retrieval-sessions\/[0-9a-f-]{36}\/(request-unlock|simulate-(completion|wrong-item|item-returned))$/,
-  /^hardware\/(workflow|capture-light)$/,
+  /^hardware\/(workflow|capture-light|simulate-presence)$/,
 ];
 
 export function isAllowedKioskAction(path: string): boolean {

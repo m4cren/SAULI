@@ -17,6 +17,7 @@ import QrResultScreen from "./QrResultScreen";
 import QrScanPanel from "./QrScanPanel";
 import StatusModal from "./StatusModal";
 import SensorFeedbackModal from "./SensorFeedbackModal";
+import SensorSimulationControls from "./SensorSimulationControls";
 import { showProvisionalConfirmation } from "../_hooks/kioskUnlockStatus";
 
 export default function KioskShell() {
@@ -66,5 +67,5 @@ export default function KioskShell() {
       case "retrieved": content = <CompletionScreen kind="retrieved" />; break;
     }
   }
-  return <div className="kiosk-shell font-sans"><CircuitBackground showTop={screen.mode === "home"} /><div inert={Boolean(modal || feedback)} aria-hidden={Boolean(modal || feedback)} className="min-h-dvh">{screen.mode === "home" ? content : <main className="kiosk-main">{content}</main>}</div>{modal && <StatusModal type={modal} />}{feedback && <SensorFeedbackModal kind={screen.mode === "found" ? "deposit" : "retrieval"} slotCode={screen.mode === "found" ? state.assignment!.slot_code : state.validatedRetrieval!.slot_code} />}</div>;
+  return <div className="kiosk-shell font-sans"><CircuitBackground showTop={screen.mode === "home"} /><div inert={Boolean(modal || feedback)} aria-hidden={Boolean(modal || feedback)} className="min-h-dvh">{screen.mode === "home" ? content : <main className="kiosk-main">{content}</main>}</div>{!modal && !feedback && <SensorSimulationControls />}{modal && <StatusModal type={modal} />}{feedback && <SensorFeedbackModal kind={screen.mode === "found" ? "deposit" : "retrieval"} slotCode={screen.mode === "found" ? state.assignment!.slot_code : state.validatedRetrieval!.slot_code} />}</div>;
 }

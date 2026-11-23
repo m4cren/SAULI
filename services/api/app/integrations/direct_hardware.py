@@ -216,6 +216,10 @@ class DirectHardwareGateway:
                 "The private hardware controller rejected API authentication.",
                 503,
             )
+        if (path == "/v1/sensor-simulation" and response.status_code == 409
+                and isinstance(body, dict)):
+            raise ServiceError("SENSOR_SIMULATION_CONFLICT",
+                str(body.get("detail") or "The simulation cannot run in this workflow."), 409)
         if response.status_code >= 400 or not isinstance(body, dict):
             raise ServiceError(
                 "HARDWARE_UNAVAILABLE",
@@ -233,6 +237,9 @@ class DirectHardwareGateway:
                 503,
             )
         return result
+
+    async def simulate_presence(self, device_id: str, payload: dict) -> dict:
+        return await self._request(device_id, "POST", "/v1/sensor-simulation", payload)
 
     async def state(self, device_id: str) -> dict:
         return await self._request(device_id, "GET", "/v1/state")

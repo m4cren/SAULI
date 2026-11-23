@@ -37,6 +37,15 @@ class ExpectedSlot(BaseModel):
     present: bool
 
 
+class SimulatedPresence(BaseModel):
+    """Operator-only logical switch change; no physical GPIO or ESP writes."""
+    model_config = ConfigDict(extra="forbid")
+    workflow_id: UUID
+    assigned_slot: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    slot: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    action: Literal["target", "disturb", "restore", "undo_target"]
+
+
 class DirectCommand(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: UUID
@@ -87,6 +96,12 @@ def load_hardware(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("mode") not in ("real", "simulation"):
         raise ValueError("Hardware mode must be explicitly real or simulation")
+    value["sensor_simulation_enabled"] = value.get("sensor_simulation_enabled", False)
+    if type(value["sensor_simulation_enabled"]) is not bool:
+        raise ValueError("sensor_simulation_enabled must be true or false")
+    if value["sensor_simulation_enabled"] and (value["mode"] != "real"
+                                                or value.get("command_transport", "direct") != "direct"):
+        raise ValueError("Sensor simulation requires real hardware in direct transport mode")
     value["command_transport"] = value.get("command_transport", "direct")
     if value["command_transport"] not in {"direct", "legacy"}:
         raise ValueError("command_transport must be direct or legacy")
@@ -188,6 +203,9 @@ class HardwareService:
         self._completion_queue_file = Path(completion_name) if completion_name else None
         self._local_operation: dict | None = None
         self._local_present: dict[str, bool] = {}
+        # An explicit operator test overlay. Never active without a config opt-in.
+        # Cleared at every new/synchronized workflow; does not touch ESP inputs.
+        self._simulated_presence: dict[str, bool] = {}
         self._local_violations: dict[str, str] = {}
         self._local_provisional_ever = False
         self._local_provisional = False
@@ -484,7 +502,8 @@ class HardwareService:
             if (entry.get("ready") is not True or entry.get("fault") not in {None, ""}
                     or type(entry.get("present")) is not bool):
                 raise ValueError("hardware_not_ready")
-            if entry["present"] is not expected[code]:
+            if (not self.settings.get("sensor_simulation_enabled", False)
+                    and entry["present"] is not expected[code]):
                 raise ValueError("sensor_state_mismatch")
         door_state = self.gpio.doors[door].snapshot()
         if door_state["door"] != "closed" or door_state["raw_level"] is None:
@@ -513,6 +532,8 @@ class HardwareService:
             "close_boot_id": None,
         }
         self._local_present = expected.copy()
+        self._simulated_presence = (expected.copy()
+            if self.settings.get("sensor_simulation_enabled", False) else {})
         self._local_violations = {}
         self._local_provisional_ever = False
         self._local_provisional = False
@@ -613,6 +634,67 @@ class HardwareService:
             self._queue_security_updates(updates)
         return changed
 
+    async def simulate_presence(self, payload: SimulatedPresence) -> dict:
+        """Inject a test-only logical reading into the existing local workflow.
+
+        An actual reed-open transition is mandatory. This cannot unlock a door,
+        bypass warnings, close a door or directly finalize a transaction.
+        """
+        if not self.settings.get("sensor_simulation_enabled", False) or not self.direct_mode:
+            raise HTTPException(status_code=404, detail="Sensor simulation disabled")
+        operation = self._local_operation
+        if (not self.ready or operation is None or
+                operation.get("workflow_id") != str(payload.workflow_id) or
+                operation["assigned_slot"] != payload.assigned_slot or
+                operation.get("phase") in {"authorized", "unlocked", "door_closed",
+                                           "locally_completed", "synced", "fault"} or
+                self.gpio.doors[operation["door"]].snapshot()["door"] != "open"):
+            raise HTTPException(status_code=409, detail="No matching open-door workflow")
+        if (payload.slot not in operation["expected"] or
+                payload.slot.startswith("P-") != operation["assigned_slot"].startswith("P-")):
+            raise HTTPException(status_code=409, detail="Slot is outside the authorized door bank")
+        if payload.action in {"target", "undo_target"}:
+            if payload.slot != operation["assigned_slot"]:
+                raise HTTPException(status_code=409, detail="Only the assigned slot may be targeted")
+            present = (operation["target_present"] if payload.action == "target"
+                       else operation["expected"][payload.slot])
+        else:
+            if payload.slot == operation["assigned_slot"]:
+                raise HTTPException(status_code=409, detail="Select another slot for the incident")
+            if payload.action == "disturb":
+                # A wrong lift needs an occupied slot; a wrong placement needs
+                # an empty slot. Do not fabricate physically impossible cases.
+                existing = operation["expected"][payload.slot]
+                if operation["kind"] == "retrieval" and not existing:
+                    raise HTTPException(status_code=409,
+                        detail="For wrong-item lifting select another occupied compartment")
+                if operation["kind"] == "deposit" and existing:
+                    raise HTTPException(status_code=409,
+                        detail="For wrong placement select an empty compartment")
+            present = (not operation["expected"][payload.slot]
+                       if payload.action == "disturb" else operation["expected"][payload.slot])
+        self._simulated_presence[payload.slot] = present
+        await self._observe_local_presence(payload.slot, present)
+        # Always log each operator action distinctly, including no-op repeats.
+        log_event("sensor_simulation", slot=payload.slot, action=payload.action,
+                  present=present, workflow_id=str(payload.workflow_id),
+                  source="operator_simulation")
+        return {"ok": True, "slot": payload.slot, "present": present,
+                "source": "operator_simulation",
+                "warning": self._local_warning_snapshot()}
+
+    def _simulated_telemetry(self, telemetry: dict) -> dict:
+        if not self.settings.get("sensor_simulation_enabled", False) or not self._simulated_presence:
+            return telemetry
+        # Only the boolean decisions are simulated. ESP connection, sampling
+        # freshness, boot ID, faults and the Pi reed remain genuine.
+        copy = json.loads(json.dumps(telemetry))
+        for entry in copy.get("slots", []):
+            code = entry.get("code")
+            if code in self._simulated_presence:
+                entry["present"] = self._simulated_presence[code]
+        return copy
+
     async def _observe_local_presence(self, slot: str, present: bool) -> None:
         if self._local_operation is None or slot not in self._local_operation["expected"]:
             return
@@ -624,7 +706,7 @@ class HardwareService:
     async def _observe_local_telemetry(self, telemetry: dict) -> None:
         if self._local_operation is None:
             return
-        readings = telemetry.get("slots")
+        readings = self._simulated_telemetry(telemetry).get("slots")
         if not isinstance(readings, list):
             return
         for reading in readings:
@@ -652,7 +734,7 @@ class HardwareService:
                 and type(operation.get("close_seq")) is int
                 and sequence <= operation["close_seq"]):
             return None, "POST_CLOSE_SEQUENCE_REQUIRED"
-        readings = telemetry.get("slots")
+        readings = self._simulated_telemetry(telemetry).get("slots")
         if not isinstance(readings, list) or len(readings) != 12:
             return None, "SENSOR_DATA_INCOMPLETE"
         observed = {row.get("code"): row for row in readings if isinstance(row, dict)}
@@ -684,6 +766,8 @@ class HardwareService:
             "verified_at": datetime.now(UTC).isoformat(),
             "esp_boot_id": boot_id,
             "telemetry_sequence": sequence,
+            "sensor_source": ("operator_simulation"
+                if self.settings.get("sensor_simulation_enabled", False) else "esp32_switch"),
         }, None
 
     async def _try_local_completion(self, telemetry: dict) -> bool:
@@ -724,6 +808,7 @@ class HardwareService:
             self._local_operation["phase"] = "synced"
         self._local_operation = None
         self._local_present = {}
+        self._simulated_presence = {}
         self._local_violations = {}
         self._local_provisional = False
         self._local_provisional_ever = False
@@ -752,6 +837,7 @@ class HardwareService:
         self._finalization_error = code.upper()
         if self._local_operation is not None:
             self._local_operation["phase"] = "fault"
+        self._simulated_presence = {}
         if self._last_unlock is not None:
             self._last_unlock["status"] = "failed"
             self._last_unlock["last_output_error"] = "hardware_failure"
@@ -806,18 +892,22 @@ class HardwareService:
         self._publish_signal.set()
 
     def snapshot(self) -> dict:
+        esp = (self.esp.snapshot() if self.settings["mode"] == "real" else
+               {"connection": "simulated", "telemetry": None})
+        if isinstance(esp.get("telemetry"), dict):
+            esp["telemetry"] = self._simulated_telemetry(esp["telemetry"])
         return {"schema_version": 1, "unit_code": self.config.unit_code,
                 "device_code": self.config.device_code,
                 "recorded_at": datetime.now(UTC).isoformat(),
                 "observed_at": self._observed_at, "sequence": self._sequence,
                 "backend": self.backend, "pi": self.gpio.snapshot(),
-                "esp": self.esp.snapshot() if self.settings["mode"] == "real" else
-                {"connection": "simulated", "telemetry": None},
+                "esp": esp,
                 "events": self.events[:64],
                 "pending_presence_count": 0 if self.direct_mode else len(self._pending_presence),
                 "last_unlock": self._last_unlock,
                 "local_warning": self._local_warning_snapshot(),
-                "door_workflow": self.door_workflow.snapshot()}
+                "door_workflow": self.door_workflow.snapshot(),
+                "sensor_simulation_active": bool(self._simulated_presence)}
 
     def _direct_event_snapshot(self) -> dict:
         """Detach queued evidence from mutable ESP/event dictionaries."""
@@ -950,6 +1040,7 @@ class HardwareService:
                         and self._local_operation["command_id"] == command_id):
                     self._local_operation = None
                     self._local_present = {}
+                    self._simulated_presence = {}
                     self._local_violations = {}
             self.event("command_rejected", command_id)
             code = str(exc)
@@ -977,6 +1068,7 @@ class HardwareService:
                     and self._local_operation["command_id"] == command_id):
                 self._local_operation = None
                 self._local_present = {}
+                self._simulated_presence = {}
                 self._local_violations = {}
             self.event("command_failed", command_id)
             return {"id": command_id, "status": "failed", "code": "hardware_failure"}
@@ -1043,7 +1135,8 @@ class HardwareService:
                     if valid_presence_event(event):
                         if self.direct_mode:
                             await self._observe_local_presence(
-                                event["slot"], event["present"])
+                                event["slot"], self._simulated_presence.get(
+                                    event["slot"], event["present"]))
                             # The local monitor has already consumed the event.
                             # Only genuine incident transitions enter the durable
                             # backend queue; routine sensor changes stay local.
@@ -1480,6 +1573,12 @@ def create_app(config: Config, settings: dict) -> FastAPI:
     def direct_state(authorization: str | None = Header(default=None)):
         authenticate_direct(authorization)
         return service.snapshot()
+
+    @app.post("/v1/sensor-simulation")
+    async def sensor_simulation(payload: SimulatedPresence,
+                                authorization: str | None = Header(default=None)):
+        authenticate_direct(authorization)
+        return await service.simulate_presence(payload)
 
     @app.post("/v1/commands")
     async def direct_command(command: DirectCommand,

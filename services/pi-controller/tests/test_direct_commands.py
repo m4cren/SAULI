@@ -752,3 +752,117 @@ def test_review_response_preserves_proven_local_completion_and_gate_low(tmp_path
     assert service._last_unlock["status"] == "completed"
     assert service.door_workflow.phase == "completed"
     assert len(json.loads(service._completion_queue_file.read_text())) == 1
+
+
+def test_operator_simulation_is_disabled_by_default_and_requires_open_reed(tmp_path):
+    from fastapi import HTTPException
+    from sauli_pi.hardware_service import SimulatedPresence
+
+    device_id = str(uuid4())
+    service, settings = make_service(tmp_path, device_id)
+    payload = command(device_id, "pocket", "deposit")
+    workflow_id = json.loads(base64.urlsafe_b64decode(
+        payload["grant"].split(".")[0] + "=="))["workflow_id"]
+    change = SimulatedPresence(workflow_id=workflow_id, assigned_slot="P-01",
+                               slot="P-01", action="target")
+    with pytest.raises(HTTPException) as denied:
+        asyncio.run(service.simulate_presence(change))
+    assert denied.value.status_code == 404
+
+    settings["sensor_simulation_enabled"] = True
+    assert asyncio.run(service.handle_command(payload))["status"] == "acked"
+    with pytest.raises(HTTPException) as closed:
+        asyncio.run(service.simulate_presence(change))
+    assert closed.value.status_code == 409
+    set_door(service, "pocket", "open")
+    wrong_workflow = SimulatedPresence(workflow_id=uuid4(), assigned_slot="P-01",
+                                      slot="P-01", action="target")
+    with pytest.raises(HTTPException) as mismatch:
+        asyncio.run(service.simulate_presence(wrong_workflow))
+    assert mismatch.value.status_code == 409
+    with pytest.raises(HTTPException) as other_bank:
+        asyncio.run(service.simulate_presence(SimulatedPresence(
+            workflow_id=workflow_id, assigned_slot="P-01", slot="M-01", action="disturb")))
+    assert other_bank.value.status_code == 409
+
+
+def test_operator_simulation_uses_pi_warning_and_postclose_rules(tmp_path):
+    from sauli_pi.hardware_service import SimulatedPresence
+    device_id = str(uuid4())
+    service, settings = make_service(tmp_path, device_id)
+    settings["sensor_simulation_enabled"] = True
+    # Mock UART delivery, otherwise a real Serial.write on the test sentinel
+    # intentionally tears down its connection during guidance refresh.
+    async def mock_send(_message):
+        pass
+    service.esp.send = mock_send
+    # The actual P-02 switch is stuck LOW, but a signed retrieval says it is occupied.
+    payload = command(device_id, "pocket", "retrieval")
+    payload["assigned_slot"] = "P-02"
+    payload["expected_slots"][0]["present"] = False
+    payload["expected_slots"][1]["present"] = True
+    payload["expected_slots"][2]["present"] = True  # P-03 contains a different item.
+    # Regenerate a signed authorization that matches the requested P-02 slot.
+    payload = rewrite_grant(payload, slot="P-02", expected_slots=payload["expected_slots"])
+    claims = json.loads(base64.urlsafe_b64decode(payload["grant"].split(".")[0] + "=="))
+    workflow_id = claims["workflow_id"]
+    assert asyncio.run(service.handle_command(payload))["status"] == "acked"
+    set_door(service, "pocket", "open")
+    assert service._simulated_presence["P-02"] is True
+
+    def press(slot, action):
+        return asyncio.run(service.simulate_presence(SimulatedPresence(
+            workflow_id=workflow_id, assigned_slot="P-02", slot=slot, action=action)))
+
+    assert press("P-03", "disturb")["warning"]["active"] is True
+    assert service._local_violations == {"P-03": "wrong_removal"}
+    assert press("P-03", "restore")["warning"]["active"] is False
+    assert press("P-02", "target")["warning"]["provisional_success"] is True
+    assert service._simulated_presence["P-02"] is False
+    physical = service.esp.last_telemetry
+    assert physical["slots"][1]["present"] is False  # Pi never writes ESP frames
+    # The mock GPIO setup does not run the live serial reader; refresh the
+    # telemetry freshness timestamp before inspecting the public Pi snapshot.
+    service.esp.last_telemetry_at = time.monotonic()
+    snap = service.snapshot()
+    assert snap["sensor_simulation_active"] is True
+    assert snap["esp"]["telemetry"]["slots"][1]["present"] is False
+    # Finish only after actual door closure and a fresh ESP sequence.
+    set_door(service, "pocket", "closed")
+    evidence, error = service._local_completion_evidence({**physical, "seq": 2})
+    assert error is None and evidence["sensor_source"] == "operator_simulation"
+    assert evidence["observed_slots"]["P-02"] is False
+
+
+def test_operator_simulated_deposit_warns_then_recovers_without_bypassing_reed(tmp_path):
+    from fastapi import HTTPException
+    from sauli_pi.hardware_service import SimulatedPresence
+    device_id = str(uuid4())
+    service, settings = make_service(tmp_path, device_id)
+    settings["sensor_simulation_enabled"] = True
+    async def mock_send(_message):
+        pass
+    service.esp.send = mock_send
+    payload = command(device_id, "medium", "deposit")
+    claims = json.loads(base64.urlsafe_b64decode(payload["grant"].split(".")[0] + "=="))
+    workflow_id = claims["workflow_id"]
+    assert asyncio.run(service.handle_command(payload))["status"] == "acked"
+    set_door(service, "medium", "open")
+
+    def press(slot, action):
+        return asyncio.run(service.simulate_presence(SimulatedPresence(
+            workflow_id=workflow_id, assigned_slot="M-01", slot=slot, action=action)))
+
+    assert press("M-02", "disturb")["warning"]["active"] is True
+    assert service._local_violations == {"M-02": "wrong_placement"}
+    assert press("M-02", "restore")["warning"]["active"] is False
+    assert press("M-01", "target")["warning"]["provisional_success"] is True
+    # An open reed must not issue finalized evidence even after pressing success.
+    evidence, reason = service._local_completion_evidence({**service.esp.last_telemetry, "seq": 2})
+    assert evidence is None and reason == "LOCAL_WORKFLOW_NOT_CLOSED"
+    set_door(service, "medium", "closed")
+    evidence, reason = service._local_completion_evidence({**service.esp.last_telemetry, "seq": 2})
+    assert reason is None and evidence["observed_slots"]["M-01"] is True
+    assert evidence["sensor_source"] == "operator_simulation"
+    with pytest.raises(HTTPException):
+        press("M-01", "undo_target")

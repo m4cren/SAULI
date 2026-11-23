@@ -1,6 +1,7 @@
 "use client";
 
 import Icon from "@/app/components/Icon";
+import SensorSimulationControls from "./SensorSimulationControls";
 
 /** Live, provisional sensor confirmation. The modal disappears automatically
  * if an incorrect switch change triggers the higher-priority warning modal,
@@ -28,6 +29,7 @@ export default function SensorFeedbackModal({
       <p className="mt-3 text-sm text-[#a26b13]">
         If another compartment is disturbed, a warning will replace this message until corrected.
       </p>
+      <SensorSimulationControls inFeedback />
     </section>
   </div>;
 }

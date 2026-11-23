@@ -1,10 +1,11 @@
 """Device-scoped hardware telemetry and a public, sanitized read-only view."""
 
 from datetime import datetime
+import hmac
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Header, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.dependencies import get_admin_user
@@ -184,6 +185,14 @@ class WorkflowEvent(BaseModel):
     presence: PresenceEvent | None = None
 
 
+class SensorSimulationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    workflow_id: UUID
+    assigned_slot: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    slot: str = Field(pattern=r"^(P-0[1-8]|M-0[1-4])$")
+    action: Literal["target", "disturb", "restore", "undo_target"]
+
+
 class CaptureLightRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool
@@ -253,6 +262,21 @@ async def workflow(request: Request, kiosk: Kiosk, item_id: UUID | None = None,
     return await request.app.state.kiosks.hardware_workflow(
         kiosk, item_id=str(item_id) if item_id else None,
         session_id=str(session_id) if session_id else None)
+
+
+@router.post("/simulate-presence")
+async def sensor_simulation(request: Request, payload: SensorSimulationRequest,
+                            kiosk: Kiosk, x_simulation_token: str | None = Header(None)):
+    settings = request.app.state.settings
+    token = settings.hardware_sensor_simulation_token
+    if not (settings.hardware_sensor_simulation_enabled and
+            settings.hardware_transport == "direct" and token and
+            x_simulation_token and hmac.compare_digest(token, x_simulation_token)):
+        raise ServiceError("SENSOR_SIMULATION_DENIED", "Operator sensor simulation is unavailable.", 403)
+    # Pi independently checks the active signed workflow, open reed and bank;
+    # the browser can never select another unit's hardware endpoint.
+    return await request.app.state.hardware.simulate_presence(kiosk["id"],
+        payload.model_dump(mode="json"))
 
 
 @router.post("/capture-light", status_code=202)

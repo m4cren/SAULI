@@ -5,6 +5,7 @@ import Button from "@/app/components/Button";
 import Icon from "@/app/components/Icon";
 import { useKiosk } from "../_hooks/useKioskFlow";
 import DesktopTestControls from "./DesktopTestControls";
+import SensorSimulationControls from "./SensorSimulationControls";
 
 export default function StatusModal({ type }: { type: "cancel" | "wrongPlacement" | "wrongItem" }) {
   const kiosk = useKiosk();
@@ -46,9 +47,9 @@ export default function StatusModal({ type }: { type: "cancel" | "wrongPlacement
         </div>
         <div className="mt-4 rounded-lg border border-red-300 bg-[#ffe4e4] p-4 text-left text-sm text-red-700"><strong>Return the item to {wrongCompartment}.</strong><p className="mt-1">Your item remains in {intended?.slot_code ?? "its assigned position"}.</p></div>
         <p role="status" className="mt-4 flex items-center justify-center gap-2 text-xs text-[#52676a]"><span aria-hidden="true" className="size-4 animate-spin rounded-full border-2 border-[#c9dede] border-t-[#0b474f]" />Waiting for item return…</p>
-        <DesktopTestControls inModal />
+        <SensorSimulationControls inModal /><DesktopTestControls inModal />
       </>}
-      {wrongPlacement && <><p className="mt-5 text-sm">{assignedItemWasRemoved ? `Return the correct item to ${assignedCompartment}.` : `Restore ${wrongCompartment} to its original state and keep the authorized item in ${assignedCompartment}.`}</p><DesktopTestControls inModal /></>}
+      {wrongPlacement && <><p className="mt-5 text-sm">{assignedItemWasRemoved ? `Return the correct item to ${assignedCompartment}.` : `Restore ${wrongCompartment} to its original state and keep the authorized item in ${assignedCompartment}.`}</p><SensorSimulationControls inModal /><DesktopTestControls inModal /></>}
       {cancel && <div className="mt-7 flex flex-col gap-2 sm:flex-row"><Button type="button" variant="outline" onClick={kiosk.stay} className="flex-1">Keep working</Button><Button type="button" onClick={kiosk.reset} className="flex-1">Discard and return home</Button></div>}
     </div>
   </div>;

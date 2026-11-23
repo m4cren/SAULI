@@ -12,7 +12,7 @@ async function forward(request: Request, context: { params: Promise<{ path: stri
   if (!token) return Response.json({ error: { code: "KIOSK_ACCESS_DENIED", message: "Kiosk registration required." } }, { status: 403 });
   const incoming = new URL(request.url);
   const headers = new Headers({ "X-Kiosk-Session": token });
-  for (const name of ["content-type", "x-idempotency-key", "x-retrieval-action"]) {
+  for (const name of ["content-type", "x-idempotency-key", "x-retrieval-action", "x-simulation-token"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }

@@ -84,6 +84,16 @@ export function getHardwareWorkflow(params: { itemId: string } | { sessionId: st
   const query = "itemId" in params ? `item_id=${encodeURIComponent(params.itemId)}` : `session_id=${encodeURIComponent(params.sessionId)}`;
   return kioskApi<HardwareWorkflow>(`/api/hardware/workflow?${query}`);
 }
+export function simulateHardwarePresence(input: {
+  workflowId: string; assignedSlot: string; slot: string;
+  action: "target" | "disturb" | "restore" | "undo_target";
+}, operatorToken: string) {
+  return kioskApi<{ ok: boolean; slot: string; present: boolean; source: string }>("/api/hardware/simulate-presence", {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Simulation-Token": operatorToken },
+    body: JSON.stringify({ workflow_id: input.workflowId, assigned_slot: input.assignedSlot,
+      slot: input.slot, action: input.action }),
+  });
+}
 export function setCaptureLight(enabled: boolean) {
   return kioskApi<{ id: string; status: string }>("/api/hardware/capture-light", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled }),
