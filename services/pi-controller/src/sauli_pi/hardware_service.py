@@ -206,6 +206,9 @@ class HardwareService:
         # An explicit operator test overlay. Never active without a config opt-in.
         # Cleared at every new/synchronized workflow; does not touch ESP inputs.
         self._simulated_presence: dict[str, bool] = {}
+        # Test-only wrong-lift incidents for empty alternative compartments.
+        # These are warnings, NOT fabricated item-presence readings.
+        self._simulated_wrong_lifts: set[str] = set()
         self._local_violations: dict[str, str] = {}
         self._local_provisional_ever = False
         self._local_provisional = False
@@ -534,6 +537,7 @@ class HardwareService:
         self._local_present = expected.copy()
         self._simulated_presence = (expected.copy()
             if self.settings.get("sensor_simulation_enabled", False) else {})
+        self._simulated_wrong_lifts.clear()
         self._local_violations = {}
         self._local_provisional_ever = False
         self._local_provisional = False
@@ -607,6 +611,15 @@ class HardwareService:
             present = self._local_present[slot]
             if present != expected:
                 current[slot] = "wrong_placement" if present else "wrong_removal"
+        # Operator-only demo: an empty alternative slot cannot physically
+        # produce a removal edge. Keep a synthetic incident until Restore so
+        # Pi buzzer/SOS and backend warnings use the existing security path.
+        # Never change expected occupancy or completion evidence for this test.
+        if (self.settings.get("sensor_simulation_enabled", False)
+                and operation["kind"] == "retrieval"):
+            for slot in self._simulated_wrong_lifts:
+                if slot != assigned and slot in operation["expected"]:
+                    current[slot] = "wrong_removal"
         updates = [
             {"slot": slot, "kind": kind, "active": False}
             for slot, kind in previous.items()
@@ -662,17 +675,19 @@ class HardwareService:
             if payload.slot == operation["assigned_slot"]:
                 raise HTTPException(status_code=409, detail="Select another slot for the incident")
             if payload.action == "disturb":
-                # A wrong lift needs an occupied slot; a wrong placement needs
-                # an empty slot. Do not fabricate physically impossible cases.
                 existing = operation["expected"][payload.slot]
-                if operation["kind"] == "retrieval" and not existing:
-                    raise HTTPException(status_code=409,
-                        detail="For wrong-item lifting select another occupied compartment")
                 if operation["kind"] == "deposit" and existing:
                     raise HTTPException(status_code=409,
                         detail="For wrong placement select an empty compartment")
+                if operation["kind"] == "retrieval" and not existing:
+                    # An empty cabinet can still demonstrate a wrong lift:
+                    # trigger a test-only incident, never fake an occupied item.
+                    self._simulated_wrong_lifts.add(payload.slot)
+            else:  # Restore clears the demo-only incident, if any.
+                self._simulated_wrong_lifts.discard(payload.slot)
             present = (not operation["expected"][payload.slot]
-                       if payload.action == "disturb" else operation["expected"][payload.slot])
+                       if payload.action == "disturb" and payload.slot not in self._simulated_wrong_lifts
+                       else operation["expected"][payload.slot])
         self._simulated_presence[payload.slot] = present
         await self._observe_local_presence(payload.slot, present)
         # Always log each operator action distinctly, including no-op repeats.
@@ -809,6 +824,7 @@ class HardwareService:
         self._local_operation = None
         self._local_present = {}
         self._simulated_presence = {}
+        self._simulated_wrong_lifts.clear()
         self._local_violations = {}
         self._local_provisional = False
         self._local_provisional_ever = False
@@ -838,6 +854,7 @@ class HardwareService:
         if self._local_operation is not None:
             self._local_operation["phase"] = "fault"
         self._simulated_presence = {}
+        self._simulated_wrong_lifts.clear()
         if self._last_unlock is not None:
             self._last_unlock["status"] = "failed"
             self._last_unlock["last_output_error"] = "hardware_failure"
@@ -1041,6 +1058,7 @@ class HardwareService:
                     self._local_operation = None
                     self._local_present = {}
                     self._simulated_presence = {}
+                    self._simulated_wrong_lifts.clear()
                     self._local_violations = {}
             self.event("command_rejected", command_id)
             code = str(exc)
@@ -1069,6 +1087,7 @@ class HardwareService:
                 self._local_operation = None
                 self._local_present = {}
                 self._simulated_presence = {}
+                self._simulated_wrong_lifts.clear()
                 self._local_violations = {}
             self.event("command_failed", command_id)
             return {"id": command_id, "status": "failed", "code": "hardware_failure"}

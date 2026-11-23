@@ -866,3 +866,62 @@ def test_operator_simulated_deposit_warns_then_recovers_without_bypassing_reed(t
     assert evidence["sensor_source"] == "operator_simulation"
     with pytest.raises(HTTPException):
         press("M-01", "undo_target")
+
+
+def test_operator_wrong_lift_empty_slot_warns_and_blocks_until_restored(tmp_path):
+    """A supervised cabinet demo can warn even if its other slots are empty."""
+    from sauli_pi.hardware_service import SimulatedPresence
+
+    device_id = str(uuid4())
+    service, settings = make_service(tmp_path, device_id)
+    settings["sensor_simulation_enabled"] = True
+    sent = []
+
+    async def mock_send(message):
+        sent.append(message)
+
+    service.esp.send = mock_send
+    payload = command(device_id, "pocket", "retrieval")
+    claims = json.loads(base64.urlsafe_b64decode(payload["grant"].split(".")[0] + "=="))
+    workflow_id = claims["workflow_id"]
+    assert payload["expected_slots"][1] == {"code": "P-02", "present": False}
+    assert asyncio.run(service.handle_command(payload))["status"] == "acked"
+    set_door(service, "pocket", "open")
+
+    def press(slot, action):
+        return asyncio.run(service.simulate_presence(SimulatedPresence(
+            workflow_id=workflow_id, assigned_slot="P-01", slot=slot, action=action)))
+
+    wrong = press("P-02", "disturb")
+    assert wrong["warning"]["active"] is True
+    assert service._local_violations == {"P-02": "wrong_removal"}
+    assert service._simulated_presence["P-02"] is False  # No invented item.
+    assert any({"slot": "P-02", "kind": "wrong_removal", "active": True}
+               in event["snapshot"].get("local_incident_updates", [])
+               for event in service._security_events)  # Backend warning queued.
+    assert service.gpio.outputs["buzzer"] is True
+    assert any(msg.get("action") == "set_all_lights"
+               and msg["modes"]["P-02"] == "SOS_BLINK" for msg in sent)
+
+    # Genuine ESP telemetry must not silently clear the synthetic incident.
+    asyncio.run(service._observe_local_telemetry(service.esp.last_telemetry))
+    assert service._local_violations == {"P-02": "wrong_removal"}
+    assert service.gpio.outputs["buzzer"] is True
+
+    # Even a correct assigned-slot removal does not override the active warning.
+    correct = press("P-01", "target")
+    assert correct["warning"]["active"] is True
+    assert service._local_provisional is True
+    assert service._local_operation["phase"] != "item_verified"
+
+    restored = press("P-02", "restore")
+    assert restored["warning"]["active"] is False
+    assert service._local_violations == {}
+    assert service._simulated_wrong_lifts == set()
+    assert any({"slot": "P-02", "kind": "wrong_removal", "active": False}
+               in event["snapshot"].get("local_incident_updates", [])
+               for event in service._security_events)  # Resolution queued.
+    assert service.gpio.outputs["buzzer"] is False
+    assert service._local_operation["phase"] == "item_verified"
+    assert any(msg.get("action") == "set_all_lights"
+               and msg["modes"]["P-02"] == "OFF" for msg in sent)
