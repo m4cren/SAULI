@@ -1,8 +1,8 @@
 # SAULI operator sensor simulation (temporary physical-cabinet demo)
 
 This is **not** the old browser-only `simulate-placement` / `simulate-completion` flow.
-The optional controls send authenticated instructions from the registered Next.js
-kiosk, through the Windows FastAPI backend and its private Tailscale gateway,
+The optional controls send authenticated instructions using the registered Next.js
+kiosk session, through Windows FastAPI and its private Tailscale gateway,
 to the Raspberry Pi hardware service. The Pi substitutes *logical slot
 presence* into the existing security monitor and post-door-close verification.
 It does **not** rewrite or flash ESP32 firmware, drive Pi GPIO, or directly call
@@ -11,7 +11,9 @@ ESP connection, 12 ready sensor channels, actual door closure, fresh ESP
 telemetry, warning resolution, solenoid deactivation, and backend reconciliation
 are still required. Sensor *presence* is simulated, not physically measured.
 
-This is a **temporary operator-only demo**. Do not use it for unattended public
+This is a **temporary supervised demo**, with no separate operator password.
+Anyone with access to the registered kiosk while all simulation flags are enabled
+can use the controls. Do not use it for unattended public
 storage, genuine ownership decisions, or claims of physical inventory accuracy.
 The current SQL completion function still labels simulated completions
 `esp32_switch` in database event provenance; the Pi journal and the durable
@@ -28,19 +30,18 @@ as evidence of real switch verification in this mode.
    `sauli-pi-hardware.service`. This changes only *presence decisions* while an
    authorized workflow is active. Pi settings are never deployed to Vercel.
 2. **Windows FastAPI backend** `.env`: set
-   `HARDWARE_SENSOR_SIMULATION_ENABLED=true` and
-   `HARDWARE_SENSOR_SIMULATION_TOKEN=<random-32+-character-secret>`.
-   Generate a strong secret with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
-   Keep the existing `HARDWARE_DIRECT_DEVICES` and private Tailscale endpoint.
-   Restart the FastAPI backend. **Do not** put this token in any
-   `NEXT_PUBLIC_` variable or Git commit.
+   `HARDWARE_SENSOR_SIMULATION_ENABLED=true`. Remove any old
+   `HARDWARE_SENSOR_SIMULATION_TOKEN` entry; it is no longer used. Keep the
+   existing `HARDWARE_DIRECT_DEVICES` and private Tailscale endpoint.
+   Restart the FastAPI backend.
 3. **Vercel frontend**: set `NEXT_PUBLIC_SENSOR_SIMULATION_ENABLED=true`,
-   redeploy the frontend, then refresh the kiosk browser. This merely shows the
-   test panel: the API requires the separate backend secret before it acts.
+   redeploy the frontend, then refresh the kiosk browser. The API still requires
+   the registered kiosk session; the Pi still verifies an authorized workflow,
+   open door and safe compartment bank. There is no separate operator password.
 
 The panel appears in the deposit placement and retrieval QR/item-location
-screens. Open **Operator sensor simulation — TEST ONLY**, type the operator
-secret, and keep the real authorized door open. The same panel is available
+screens. Open **Operator sensor simulation — TEST ONLY** and keep the real
+authorized door open. The same panel is available
 inside the wrong-compartment warning and correct-item provisional modal so
 that you can test restoration or disturbances after a provisional success.
 

@@ -87,9 +87,9 @@ export function getHardwareWorkflow(params: { itemId: string } | { sessionId: st
 export function simulateHardwarePresence(input: {
   workflowId: string; assignedSlot: string; slot: string;
   action: "target" | "disturb" | "restore" | "undo_target";
-}, operatorToken: string) {
+}) {
   return kioskApi<{ ok: boolean; slot: string; present: boolean; source: string }>("/api/hardware/simulate-presence", {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Simulation-Token": operatorToken },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workflow_id: input.workflowId, assigned_slot: input.assignedSlot,
       slot: input.slot, action: input.action }),
   });

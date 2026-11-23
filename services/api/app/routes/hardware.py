@@ -1,11 +1,10 @@
 """Device-scoped hardware telemetry and a public, sanitized read-only view."""
 
 from datetime import datetime
-import hmac
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth.dependencies import get_admin_user
@@ -266,12 +265,10 @@ async def workflow(request: Request, kiosk: Kiosk, item_id: UUID | None = None,
 
 @router.post("/simulate-presence")
 async def sensor_simulation(request: Request, payload: SensorSimulationRequest,
-                            kiosk: Kiosk, x_simulation_token: str | None = Header(None)):
+                            kiosk: Kiosk):
     settings = request.app.state.settings
-    token = settings.hardware_sensor_simulation_token
     if not (settings.hardware_sensor_simulation_enabled and
-            settings.hardware_transport == "direct" and token and
-            x_simulation_token and hmac.compare_digest(token, x_simulation_token)):
+            settings.hardware_transport == "direct"):
         raise ServiceError("SENSOR_SIMULATION_DENIED", "Operator sensor simulation is unavailable.", 403)
     # Pi independently checks the active signed workflow, open reed and bank;
     # the browser can never select another unit's hardware endpoint.

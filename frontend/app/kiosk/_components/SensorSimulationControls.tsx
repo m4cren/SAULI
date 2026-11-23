@@ -5,10 +5,6 @@ import { simulateHardwarePresence } from "@/libs/api/sauli";
 import { mediumCodes, pocketCodes } from "@/libs/storage/slots";
 import { useKiosk } from "../_hooks/useKioskFlow";
 
-// Operator secret survives temporary screen/modal remounts in this kiosk tab;
-// it is never baked into the JS bundle, URL, localStorage or sessionStorage.
-let operatorTokenInMemory = "";
-
 /** Optional operator panel. All actions go through backend -> authenticated Pi,
  * changing only the Pi's test sensor overlay, NEVER the DB/Next reducer directly.
  * Real GPIO, reed, solenoid, LEDs and the existing completion workflow remain.
@@ -25,7 +21,6 @@ export default function SensorSimulationControls({ inModal = false, inFeedback =
   const assigned = itemId ? kiosk.state.assignment?.slot_code : sessionId ? kiosk.state.validatedRetrieval?.slot_code : null;
   const slots = assigned?.startsWith("P-") ? pocketCodes : mediumCodes;
   const alternatives = slots.filter((slot) => slot !== assigned);
-  const [token, setToken] = useState(operatorTokenInMemory);
   const [wrongSlot, setWrongSlot] = useState<string>("");
   const [sending, setSending] = useState(false);
   const [message, setMessage] = useState("");
@@ -36,14 +31,14 @@ export default function SensorSimulationControls({ inModal = false, inFeedback =
   if (kiosk.locallyCompleted || kiosk.syncPending) return null;
   const selected = (inModal && kiosk.state.wrongSlot && alternatives.includes(kiosk.state.wrongSlot))
     ? kiosk.state.wrongSlot : alternatives.includes(wrongSlot as typeof alternatives[number]) ? wrongSlot : alternatives[0];
-  const canAct = kiosk.hardwareOnline === true && kiosk.hardwareDoor === "open" && !sending && token.length >= 32;
+  const canAct = kiosk.hardwareOnline === true && kiosk.hardwareDoor === "open" && !sending;
 
   async function simulate(slot: string, action: "target" | "disturb" | "restore" | "undo_target") {
     if (!assigned || !(itemId || sessionId) || !canAct) return;
     setSending(true);
     setMessage("");
     try {
-      const result = await simulateHardwarePresence({ workflowId: (itemId || sessionId)!, assignedSlot: assigned, slot, action }, token);
+      const result = await simulateHardwarePresence({ workflowId: (itemId || sessionId)!, assignedSlot: assigned, slot, action });
       setMessage(`${result.slot}: ${result.present ? "item present" : "item absent"}. Waiting for live Pi status...`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Simulation request failed.");
@@ -58,12 +53,6 @@ export default function SensorSimulationControls({ inModal = false, inFeedback =
     <summary className="cursor-pointer text-sm font-bold text-amber-900">Operator sensor simulation — TEST ONLY</summary>
     <div className="mt-3 grid gap-2 text-sm text-amber-950">
       <p>Simulates presence readings; the real door reed and the existing Pi completion checks still apply. Do not use for unattended public operation.</p>
-      <label className="grid gap-1">Operator test secret
-        <input type="password" autoComplete="off" value={token} onChange={(e) => {
-          setToken(e.target.value);
-          operatorTokenInMemory = e.target.value;
-        }} placeholder="Enter operator token" className="w-full rounded border border-amber-600 bg-white p-2" />
-      </label>
       <p className="font-semibold">Assigned: {assigned} · {screen.mode === "found" ? "deposit" : "retrieval"}</p>
       {kiosk.hardwareDoor !== "open" && <p role="status">Open the authorized door before using the simulation buttons.</p>}
       {!inModal && <div className="grid grid-cols-2 gap-2">

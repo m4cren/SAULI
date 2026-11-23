@@ -76,10 +76,8 @@ class Settings(BaseSettings):
     )
     hardware_direct_timeout_seconds: float = Field(default=4, gt=0, le=15)
     hardware_unlock_grant_ttl_seconds: int = Field(default=90, ge=15, le=300)
-    # Operator switch simulation is explicitly opt-in and requires a secret
-    # never shipped to the browser bundle.
+    # Opt-in sensor simulation for supervised registered-kiosk testing only.
     hardware_sensor_simulation_enabled: bool = False
-    hardware_sensor_simulation_token: str | None = Field(default=None, repr=False, min_length=32)
 
     @model_validator(mode="after")
     def require_production_retrieval_pepper(self) -> "Settings":
