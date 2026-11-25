@@ -4,12 +4,17 @@ import { useEffect, useState } from "react";
 import styles from "./HardwareDebugPanel.module.css";
 
 type Connection = "online" | "stale" | "offline";
-type Slot = { code: string; ready?: boolean; grams?: number | null; present?: boolean | null; calibrated?: boolean; light_command?: boolean; fault?: string | null };
+type Slot = {
+  code: string; ready?: boolean; grams?: number | null; raw?: number | null;
+  dt_gpio?: number | null; baseline_g?: number | null; weight_change_g?: number | null;
+  tare_ready?: boolean; present?: boolean | null; calibrated?: boolean;
+  light_command?: boolean; light_mode?: string; fault?: string | null;
+};
 type Unit = {
   unit_name: string; received_at: string; observed_at?: string | null; sequence?: number | null; connection: Connection;
   doors: Record<string, { raw_level: number | null; door: string }>;
   outputs: Record<string, boolean>; lock_feedback: string;
-  esp: { connection: Connection; frame_errors: number; error: string | null; slots: Slot[] };
+  esp: { connection: Connection; sensor_mode?: "hx711" | "switch" | null; frame_errors: number; error: string | null; slots: Slot[] };
   door_workflow?: { command_id?: string | null; door?: string | null; phase?: string; fault?: string | null };
   events: { at: string; kind: string; command_id?: string | null }[];
 };
@@ -94,6 +99,8 @@ export default function HardwareDebugPanel() {
   const log = (message: string) => setEvents((old) => [`${new Date().toLocaleTimeString()}  ${message}`, ...old].slice(0, 8));
   const slots = codes.map((code) => unit?.esp.slots.find((slot) => slot.code === code) || { code });
   const connection = mode === "simulation" ? (simBackend ? "Simulated online" : "Simulated offline") : error ? "Unavailable" : unit?.connection || "No telemetry";
+  const sensorMode = mode === "simulation" ? "browser-only simulation" : unit?.esp.sensor_mode || "unknown";
+  const weight = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : ""}${value.toFixed(2)} g` : "Not available";
 
   return <main className={styles.shell}>
     <header className={styles.header}><strong>SAULI / Hardware Debug</strong><span>{mode === "simulation" ? "LOCAL SIMULATION · NO HARDWARE CONTROL" : "PUBLIC LIVE VIEW · READ ONLY"}</span></header>
@@ -109,16 +116,35 @@ export default function HardwareDebugPanel() {
       <section className={styles.cards} aria-label="Connections and doors">
         <article className={styles.card}><h2>Backend</h2><strong>{connection}</strong></article>
         <article className={styles.card}><h2>Raspberry Pi</h2><strong>{mode === "simulation" ? "Simulated connected" : unit?.connection || "Unavailable"}</strong></article>
-        <article className={styles.card}><h2>ESP32-S3</h2><strong>{mode === "simulation" ? (simEsp ? "Simulated connected" : "Simulated disconnected") : unit?.esp.connection || "Unavailable"}</strong></article>
+        <article className={styles.card}><h2>ESP32-S3</h2><strong>{mode === "simulation" ? (simEsp ? "Simulated connected" : "Simulated disconnected") : unit?.esp.connection || "Unavailable"}</strong><small>Sensor mode: {sensorMode}</small>{mode === "live" && <small>UART frame errors: {unit?.esp.frame_errors ?? "unknown"}</small>}</article>
         {(["medium", "pocket"] as const).map((door) => <article className={styles.card} key={door}><h2>{door === "medium" ? "Medium door · BCM8" : "Pocket door · BCM7"}</h2><strong>{mode === "simulation" ? (simDoors[door] ? "Open" : "Closed") : unit?.doors[door]?.door || "Unknown"}</strong><small>Raw level: {mode === "simulation" ? (simDoors[door] ? "HIGH" : "LOW") : unit?.doors[door]?.raw_level === null || unit?.doors[door]?.raw_level === undefined ? "Unavailable" : unit.doors[door].raw_level ? "HIGH" : "LOW"}</small></article>)}
       </section>
 
       <div className={styles.columns}>
-        <section className={styles.card}><h2>Compartment sensors (12)</h2><div className={styles.grid}>{slots.map((slot) => {
-          const present = mode === "simulation" ? !!simSlots[slot.code] : slot.present;
-          const ready = mode === "simulation" ? simEsp : unit?.connection === "online" && unit.esp.connection === "online" && slot.ready;
-          return <div className={styles.slot} key={slot.code}><strong>{slot.code}</strong><span>{!ready ? "Sensor unavailable" : present === null || present === undefined ? "Presence unknown" : present ? "Item detected" : "Empty"}</span><small>{mode === "simulation" ? "Simulated" : slot.calibrated && slot.grams !== null && slot.grams !== undefined ? `${slot.grams.toFixed(1)} g` : "Weight uncalibrated"}</small><small>Light command: {mode === "simulation" ? simLights[slot.code] ? "on" : "off" : slot.light_command ? "on" : "off"}</small></div>;
-        })}</div></section>
+        <section className={styles.card}>
+          <h2>Compartment sensors (12)</h2>
+          <p className={styles.muted}>HX711 readings are relative to startup tare. A zero reading never proves a compartment is empty. Workflow weight change is measured against the pre-opening baseline. Live view is read-only.</p>
+          <div className={styles.grid}>{slots.map((slot) => {
+            const present = mode === "simulation" ? !!simSlots[slot.code] : slot.present;
+            const ready = mode === "simulation" ? simEsp : unit?.connection === "online" && unit.esp.connection === "online" && slot.ready;
+            const hx = mode === "live" && sensorMode === "hx711";
+            return <div className={styles.slot} key={slot.code}>
+              <strong>{slot.code}</strong>
+              <span>{!ready ? "Sensor unavailable" : present === null || present === undefined ? hx ? "Presence evaluated during workflow" : "Presence unknown" : present ? "Item detected" : "Empty"}</span>
+              {hx && <>
+                <div className={styles.measurement}><small>Relative weight (startup tare)</small><strong>{slot.calibrated && slot.tare_ready && ready && typeof slot.grams === "number" ? weight(slot.grams) : "Uncalibrated / unavailable"}</strong></div>
+                <small>Workflow change: <b>{typeof slot.weight_change_g === "number" ? weight(slot.weight_change_g) : "No active reference"}</b></small>
+                <small>Workflow baseline: {typeof slot.baseline_g === "number" ? weight(slot.baseline_g) : "Not captured"}</small>
+                <small>HX711 raw: {slot.raw ?? "Not sampled"} counts</small>
+                <small>DT: GPIO{slot.dt_gpio ?? "?"} · CLK: GPIO47</small>
+                <small>Boot tare: {slot.tare_ready ? "Ready" : "Pending"} · Calibration: {slot.calibrated ? "Saved" : "Required"}</small>
+                <small>Fault: {slot.fault || "None"}</small>
+              </>}
+              {!hx && <small>{mode === "simulation" ? "Browser-only simulation; no weight readings" : sensorMode === "switch" ? "Switch input (no weight data)" : "Sensor mode unavailable"}</small>}
+              <small>Light: {mode === "simulation" ? simLights[slot.code] ? "On" : "Off" : slot.light_mode || (slot.light_command ? "On" : "Off")}</small>
+            </div>;
+          })}</div>
+        </section>
         <aside className={styles.stack}>
           <section className={styles.card}><h2>Output commands</h2>{["main_light", "buzzer", "pocket_solenoid", "medium_solenoid", "pocket_light_gate", "medium_light_gate"].map((name) => <div className={styles.row} key={name}><span>{name.replaceAll("_", " ")}</span><strong>{mode === "simulation" ? "Simulated off" : unit?.outputs[name] ? "On" : "Off"}</strong></div>)}<p className={styles.muted}>Lock feedback: unavailable. Door contact is separate from lock status.</p>{mode === "live" && unit?.door_workflow && <><h3>Door workflow</h3><div className={styles.row}><span>{unit.door_workflow.door || "No door"}</span><strong>{unit.door_workflow.phase?.replaceAll("_", " ") || "idle"}</strong></div>{unit.door_workflow.command_id && <p className={styles.muted}>Command {unit.door_workflow.command_id.slice(0, 8)}{unit.door_workflow.fault ? ` · ${unit.door_workflow.fault.replaceAll("_", " ")}` : ""}</p>}</>}</section>
           {mode === "simulation" && <section className={styles.card}><h2>Local simulation controls</h2><div className={styles.controls}><button onClick={() => { setSimDoors((s) => ({...s, pocket: !s.pocket})); log("Pocket magnet changed"); }}>Toggle pocket magnet</button><button onClick={() => { setSimDoors((s) => ({...s, medium: !s.medium})); log("Medium magnet changed"); }}>Toggle medium magnet</button><button onClick={() => { setSimEsp((s) => !s); log("ESP link changed"); }}>Toggle ESP link</button><button onClick={() => { setSimBackend((s) => !s); log("Backend link changed"); }}>Toggle backend link</button><label>Compartment <select id="sim-slot" defaultValue="P-01">{codes.map((code) => <option key={code}>{code}</option>)}</select></label><button onClick={() => { const code = (document.getElementById("sim-slot") as HTMLSelectElement).value; setSimSlots((s) => ({...s, [code]: !s[code]})); log(`${code} item presence changed`); }}>Place / remove item</button><button onClick={() => { const code = (document.getElementById("sim-slot") as HTMLSelectElement).value; setSimLights((s) => ({...s, [code]: !s[code]})); log(`${code} light command changed`); }}>Toggle light command</button></div></section>}

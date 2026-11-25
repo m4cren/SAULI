@@ -25,3 +25,8 @@
 .controls label { display: grid; gap: 4px; }
 .event { border-bottom: 1px solid #e4eeec; padding: 6px 0; font-size: 13px; }
 @media (max-width: 800px) { .columns { grid-template-columns: 1fr; } }
+
+.measurement { margin: 10px 0 8px; padding: 9px; border-radius: 8px; background: #e5f3f0; }
+.measurement small { margin: 0; }
+.measurement strong { font-size: 21px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.slot small { overflow-wrap: anywhere; }

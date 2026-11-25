@@ -1,6 +1,10 @@
 {
   "mode": "simulation",
   "sensor_simulation_enabled": false,
+  "hx711_change_threshold_g": 5.0,
+  "hx711_restore_threshold_g": 2.0,
+  "hx711_stable_telemetry_samples": 2,
+  "hx711_slot_thresholds_g": {},
   "device_id": "REPLACE-WITH-REGISTERED-DEVICE-UUID",
   "command_transport": "direct",
   "direct_api_token": "REPLACE-WITH-THE-SAME-32-PLUS-CHARACTER-API-TOKEN",

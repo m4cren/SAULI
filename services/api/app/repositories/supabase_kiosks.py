@@ -689,6 +689,7 @@ class SupabaseKioskRepository:
                     "esp": {"connection": esp.get("connection", "offline"),
                             "frame_errors": esp.get("frame_errors", 0),
                             "error": esp.get("error"),
+                            "sensor_mode": telemetry.get("sensor_mode"),
                             "slots": telemetry.get("slots", [])},
                     "events": snapshot.get("events", [])[:10],
                 })
@@ -724,7 +725,9 @@ class SupabaseKioskRepository:
                 "last_unlock": snapshot.get("last_unlock"),
                 "esp": {"connection": esp.get("connection", "offline"),
                         "frame_errors": esp.get("frame_errors", 0),
-                        "error": esp.get("error"), "slots": telemetry.get("slots", [])},
+                        "error": esp.get("error"),
+                        "sensor_mode": telemetry.get("sensor_mode"),
+                        "slots": telemetry.get("slots", [])},
                 "events": snapshot.get("events", [])[:10],
             })
         return {"units": result}

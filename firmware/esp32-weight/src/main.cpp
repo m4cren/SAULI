@@ -14,8 +14,14 @@ constexpr uint8_t UART_RX = 44, UART_TX = 43;
 constexpr uint32_t BAUD = 115200, TELEMETRY_MS = 1000, SENSOR_TIMEOUT_MS = 3000;
 constexpr uint32_t DOOR_STATE_TIMEOUT_MS = 7000;
 constexpr uint16_t MAX_LINE = 4096;
-constexpr float PRESENCE_ON_G = 30.0f, PRESENCE_OFF_G = 15.0f;
-constexpr uint8_t STABLE_SAMPLES = 3;
+// Calibration is for change sensitivity and debug only; logical occupancy is
+// decided by the Pi during an authorized workflow, never by boot-tared zero.
+constexpr uint8_t BOOT_TARE_SAMPLES = 6;
+constexpr int32_t BOOT_TARE_RAW_SPREAD_MAX = 4000;
+#ifndef SAULI_HX711_ENABLED_MASK
+#define SAULI_HX711_ENABLED_MASK 0x0FFF
+#endif
+constexpr uint16_t HX711_ENABLED_MASK = SAULI_HX711_ENABLED_MASK;
 constexpr uint32_t DEBOUNCE_MS = 60;
 constexpr uint32_t GUIDANCE_TIMEOUT_MS = 15000;
 #ifdef SAULI_SENSOR_MODE_HX711
@@ -27,12 +33,13 @@ const char *const MODE_NAMES[] = {"OFF", "STEADY_ON", "NORMAL_BLINK", "SOS_BLINK
 const char *const CODES[12] = {"P-01","P-02","P-03","P-04","P-05","P-06","P-07","P-08",
                                "M-01","M-02","M-03","M-04"};
 const uint8_t DOUT_PINS[12] = {40,18,17,15,7,6,5,9,14,13,12,11};
-const bool ENABLED[12] = {true,true,true,true,true,true,true,true,true,true,true,true};
 
 struct Sensor {
   bool ready = false, calibrated = false, present = false;
-  bool hasRaw = false;
-  int32_t raw = 0, tare = 0;
+  bool hasRaw = false, tareReady = false;
+  int32_t raw = 0, tare = 0, tareMin = INT32_MAX, tareMax = INT32_MIN;
+  int64_t tareSum = 0;
+  uint8_t tareSamples = 0;
   float countsPerGram = NAN, filtered = NAN;
   uint8_t pending = 0;
   uint32_t lastReady = 0;
@@ -53,6 +60,8 @@ uint32_t lastGuidanceAt = 0;
 bool guidanceArmed = false;
 uint32_t bootId = 0, eventSeq = 0;
 char lineBuffer[MAX_LINE + 1];
+char usbBuffer[96];
+uint8_t usbLength = 0;
 uint16_t lineLength = 0;
 bool discardLine = false;
 uint32_t seqNo = 0, lastTelemetry = 0;
@@ -214,64 +223,86 @@ void scanSwitches() {
 void loadCalibration() {
   prefs.begin("sauli-hx711", false);
   for (int i = 0; i < 12; ++i) {
-    String t = "t" + String(i), s = "s" + String(i);
-    sensors[i].tare = prefs.getInt(t.c_str(), 0);
+    String s = "s" + String(i);
+    // Never reuse a previous boot's tare. It might include a stored item.
+    // Capture a fresh, stable baseline at boot while all doors are closed.
+    sensors[i].tare = 0;
+    sensors[i].tareReady = false;
     sensors[i].countsPerGram = prefs.getFloat(s.c_str(), NAN);
     sensors[i].calibrated = isfinite(sensors[i].countsPerGram) && fabsf(sensors[i].countsPerGram) >= 1.0f;
   }
 }
 
 void sampleSharedClock() {
-  uint16_t participating = 0;
-  uint32_t values[12] = {};
+  uint16_t enabled = HX711_ENABLED_MASK & 0x0FFF;
+  if (!enabled) return;
+  // All enabled devices share PD_SCK. Do NOT clock an unready HX711:
+  // the same 25 pulses reach every device and can desynchronise its frame.
+  // When one is missing, we fail closed rather than produce false changes.
   for (int i = 0; i < 12; ++i) {
-    if (ENABLED[i] && digitalRead(DOUT_PINS[i]) == LOW) participating |= uint16_t(1) << i;
+    if ((enabled & (uint16_t(1) << i)) && digitalRead(DOUT_PINS[i]) != LOW) return;
   }
-  if (!participating) return;
-
-  // One 25-pulse train for every ready HX711: 24 data bits plus gain-128 select.
-  // Interrupts stay disabled to keep PD_SCK HIGH far below the 60us power-down
-  // threshold. Channels not ready at the start are invalid for this train.
+  uint32_t values[12] = {};
   noInterrupts();
   for (int bit = 0; bit < 24; ++bit) {
     digitalWrite(HX_CLOCK_PIN, HIGH);
     delayMicroseconds(1);
     for (int i = 0; i < 12; ++i) {
-      if (participating & (uint16_t(1) << i))
+      if (enabled & (uint16_t(1) << i))
         values[i] = (values[i] << 1) | uint32_t(digitalRead(DOUT_PINS[i]));
     }
     digitalWrite(HX_CLOCK_PIN, LOW);
     delayMicroseconds(1);
   }
-  digitalWrite(HX_CLOCK_PIN, HIGH);
+  digitalWrite(HX_CLOCK_PIN, HIGH); // 25th pulse: channel A gain 128
   delayMicroseconds(1);
   digitalWrite(HX_CLOCK_PIN, LOW);
   interrupts();
 
   for (int i = 0; i < 12; ++i) {
-    if (!(participating & (uint16_t(1) << i))) continue;
+    if (!(enabled & (uint16_t(1) << i))) continue;
     Sensor &s = sensors[i];
     s.raw = (values[i] & 0x800000UL) ? int32_t(values[i] | 0xFF000000UL) : int32_t(values[i]);
     s.hasRaw = s.ready = true;
     s.lastReady = millis();
     s.fault = "";
-    if (!s.calibrated) continue;
-    float grams = float(s.raw - s.tare) / s.countsPerGram;
-    s.filtered = isfinite(s.filtered) ? 0.7f * s.filtered + 0.3f * grams : grams;
-    bool desired = s.present ? s.filtered > PRESENCE_OFF_G : s.filtered > PRESENCE_ON_G;
-    if (desired != s.present) {
-      if (++s.pending >= STABLE_SAMPLES) {
-        s.present = desired; s.pending = 0;
-        publishPresence(i, desired ? "ITEM_PRESENT" : "ITEM_REMOVED");
+    if (!s.tareReady) {
+      // Reject noisy startup windows rather than capturing a moving item.
+      if (s.tareSamples && (int64_t(s.raw) - s.tareMin > BOOT_TARE_RAW_SPREAD_MAX ||
+                            int64_t(s.tareMax) - s.raw > BOOT_TARE_RAW_SPREAD_MAX)) {
+        s.tareSamples = 0; s.tareSum = 0;
+        s.tareMin = INT32_MAX; s.tareMax = INT32_MIN;
       }
-    } else s.pending = 0;
+      s.tareSum += s.raw;
+      ++s.tareSamples;
+      if (s.raw < s.tareMin) s.tareMin = s.raw;
+      if (s.raw > s.tareMax) s.tareMax = s.raw;
+      if (s.tareSamples >= BOOT_TARE_SAMPLES) {
+        s.tare = int32_t(s.tareSum / s.tareSamples);
+        s.tareReady = true;
+        s.filtered = 0.0f;
+#if SAULI_VERBOSE_DIAGNOSTICS
+        Serial.printf("[HX711] %s boot-tared to raw=%ld; calibrated=%u\n",
+                      CODES[i], (long)s.tare, s.calibrated);
+#endif
+      }
+      continue;
+    }
+    if (!s.calibrated) continue;
+    float grams = float(int64_t(s.raw) - int64_t(s.tare)) / s.countsPerGram;
+    if (!isfinite(grams)) { s.fault = "bad_calibration"; s.ready = false; continue; }
+    s.filtered = isfinite(s.filtered) ? 0.7f * s.filtered + 0.3f * grams : grams;
+    // No ITEM_PRESENT/ITEM_REMOVED events here: after reboot, zero can mean
+    // occupied. The Pi compares calibrated changes with the authorized grant.
   }
 }
 
 void updateFaults() {
   for (int i = 0; i < 12; ++i) {
     Sensor &s = sensors[i];
-    if (!ENABLED[i]) { s.ready = false; s.fault = "disabled"; continue; }
+    if (!(HX711_ENABLED_MASK & (uint16_t(1) << i))) {
+      s.ready = false; s.fault = "disabled"; continue;
+    }
     if (millis() - s.lastReady > SENSOR_TIMEOUT_MS) {
       s.ready = false;
       s.fault = "not_ready";
@@ -286,6 +317,7 @@ void telemetry() {
   JsonDocument doc;
   doc["v"] = 1; doc["type"] = "telemetry";
   doc["seq"] = ++seqNo; doc["uptime_ms"] = millis();
+  doc["sensor_mode"] = SWITCH_MODE ? "switch" : "hx711";
   JsonObject doors = doc["doors"].to<JsonObject>();
   doors["pocket"] = doorStateName(pocketDoor);
   doors["medium"] = doorStateName(mediumDoor);
@@ -295,12 +327,14 @@ void telemetry() {
     Sensor &s = sensors[i];
     JsonObject slot = slots.add<JsonObject>();
     slot["code"] = CODES[i]; slot["ready"] = s.ready;
+    slot["dt_gpio"] = DOUT_PINS[i];
     if (s.hasRaw) slot["raw"] = s.raw; else slot["raw"] = nullptr;
+    slot["tare_ready"] = SWITCH_MODE || s.tareReady;
     slot["calibrated"] = s.calibrated;
     if (s.ready && s.calibrated && isfinite(s.filtered)) slot["grams"] = s.filtered;
     else slot["grams"] = nullptr;
-    if (s.ready && (SWITCH_MODE || s.calibrated)) slot["present"] = s.present;
-    else slot["present"] = nullptr;
+    if (SWITCH_MODE && s.ready) slot["present"] = s.present;
+    else slot["present"] = nullptr; // Pi owns HX711 logical occupancy
     slot["light_command"] = lightCommands[i];
     slot["light_mode"] = MODE_NAMES[lightModes[i]];
     slot["fault"] = s.fault;
@@ -347,7 +381,11 @@ void handleLine(const char *line) {
     return;
   }
   if (strcmp(type, "snapshot") == 0) {
-    for (int i = 0; i < 12; ++i) publishPresence(i, "SENSOR_SNAPSHOT");
+    // Boot-tared HX711 readings cannot describe absolute occupancy. Never
+    // publish an all-empty snapshot when a stored item may still be inside.
+    if (SWITCH_MODE) {
+      for (int i = 0; i < 12; ++i) publishPresence(i, "SENSOR_SNAPSHOT");
+    } else telemetry();
     return;
   }
   if (strcmp(type, "command") != 0) {
@@ -404,17 +442,18 @@ void handleLine(const char *line) {
   if (strcmp(action, "tare") == 0) {
     if (SWITCH_MODE) { sendReply("error", id, "switch_mode"); return; }
     if (!s.ready || !s.hasRaw) { sendReply("error", id, "sensor_not_ready"); return; }
-    s.tare = s.raw; s.filtered = NAN; s.present = false; s.pending = 0;
-    String key = "t" + String(i); prefs.putInt(key.c_str(), s.tare);
+    s.tare = s.raw; s.filtered = 0.0f; s.tareReady = true;
+    // Session baseline is never changed by this command; only use when idle.
+    // Deliberately not persisted: startup tare always happens after reboot.
     sendReply("ack", id, "tared"); return;
   }
   if (strcmp(action, "calibrate") == 0) {
     if (SWITCH_MODE) { sendReply("error", id, "switch_mode"); return; }
     float reference = doc["reference_grams"] | 0.0f;
-    if (!s.ready || !s.hasRaw || reference <= 0 || reference > 10000) {
+    if (!s.ready || !s.hasRaw || !s.tareReady || reference <= 0 || reference > 10000) {
       sendReply("error", id, "invalid_calibration"); return;
     }
-    float scale = float(s.raw - s.tare) / reference;
+    float scale = float(int64_t(s.raw) - int64_t(s.tare)) / reference;
     if (!isfinite(scale) || fabsf(scale) < 1.0f) {
       sendReply("error", id, "invalid_calibration"); return;
     }
@@ -459,6 +498,67 @@ void pollSerial() {
   }
 }
 
+// Use USB CDC, not the Pi UART, for bench calibration. Only compiled in
+// HX711 mode. Run TARE with the platform steady, then add a known test mass
+// and run CALIBRATE with that mass in grams. Do not calibrate during a workflow.
+void pollUsbCalibration() {
+#if defined(SAULI_HX711_BENCH_CALIBRATION)
+  if (SWITCH_MODE) return;
+  while (Serial.available()) {
+    char c = char(Serial.read());
+    if (c == '\r') continue;
+    if (c == '\n') {
+      usbBuffer[usbLength] = 0;
+      char code[12] = {};
+      float grams = 0.0f;
+      int i = -1;
+      if (sscanf(usbBuffer, "TARE %11s", code) == 1 &&
+          strncmp(usbBuffer, "TARE ", 5) == 0) {
+        i = slotIndex(code);
+        if (i < 0 || !sensors[i].ready || !sensors[i].hasRaw) {
+          Serial.println("[HX711] TARE rejected: slot/sensor unavailable");
+        } else {
+          sensors[i].tare = sensors[i].raw;
+          sensors[i].tareReady = true;
+          sensors[i].filtered = 0.0f;
+          Serial.printf("[HX711] %s tared at raw=%ld (RAM only)\n", code,
+                        (long)sensors[i].tare);
+        }
+      } else if (sscanf(usbBuffer, "CALIBRATE %11s %f", code, &grams) == 2 &&
+                 strncmp(usbBuffer, "CALIBRATE ", 10) == 0) {
+        i = slotIndex(code);
+        if (i < 0 || !sensors[i].ready || !sensors[i].tareReady ||
+            grams <= 0.0f || grams > 10000.0f) {
+          Serial.println("[HX711] CALIBRATE rejected: bad slot/weight");
+        } else {
+          float scale = float(int64_t(sensors[i].raw) - sensors[i].tare) / grams;
+          if (!isfinite(scale) || fabsf(scale) < 1.0f) {
+            Serial.println("[HX711] CALIBRATE rejected: insufficient signal");
+          } else {
+            sensors[i].countsPerGram = scale;
+            sensors[i].calibrated = true;
+            sensors[i].filtered = NAN;
+            String key = "s" + String(i);
+            prefs.putFloat(key.c_str(), scale);
+            Serial.printf("[HX711] %s scale=%.3f counts/g saved\n", code, scale);
+          }
+        }
+      } else if (strcmp(usbBuffer, "STATUS") == 0) {
+        for (int n = 0; n < 12; ++n)
+          Serial.printf("[HX711] %s GPIO%u raw=%ld tare=%ld ready=%u calibrated=%u grams=%.2f\n",
+                        CODES[n], DOUT_PINS[n], (long)sensors[n].raw,
+                        (long)sensors[n].tare, sensors[n].tareReady,
+                        sensors[n].calibrated, sensors[n].filtered);
+      } else if (usbLength) Serial.println("[HX711] Unknown command");
+      usbLength = 0;
+    } else if (usbLength < sizeof(usbBuffer) - 1) usbBuffer[usbLength++] = c;
+    else usbLength = 0;
+  }
+#else
+  // No USB calibration surface in the deployment build.
+#endif
+}
+
 void setup() {
   pinMode(DATA_PIN, OUTPUT); pinMode(CLOCK_PIN, OUTPUT); pinMode(LATCH_PIN, OUTPUT);
   if (!SWITCH_MODE) { pinMode(HX_CLOCK_PIN, OUTPUT); digitalWrite(HX_CLOCK_PIN, LOW); }
@@ -484,6 +584,7 @@ void setup() {
 
 void loop() {
   pollSerial();
+  pollUsbCalibration();
   if (guidanceArmed && millis() - lastGuidanceAt > GUIDANCE_TIMEOUT_MS) {
     for (int slot = 0; slot < 12; ++slot) {
       lightModes[slot] = OFF; lightCommands[slot] = false;

@@ -24,6 +24,7 @@ from sauli_pi.communication.backend_client import DeviceApiError, request_json
 from sauli_pi.communication.esp32_serial import EspLink
 from sauli_pi.config import Config, read_credential
 from sauli_pi.hardware.controller import GPIOController
+from sauli_pi.hx711_presence import HX711PresenceSession
 from sauli_pi.workflows.door import DoorWorkflow
 
 LOG = logging.getLogger("sauli.hardware")
@@ -102,6 +103,29 @@ def load_hardware(path: Path) -> dict:
     if value["sensor_simulation_enabled"] and (value["mode"] != "real"
                                                 or value.get("command_transport", "direct") != "direct"):
         raise ValueError("Sensor simulation requires real hardware in direct transport mode")
+    # HX711 is opt-in firmware; no switch behavior is changed by these settings.
+    for key, default, minimum, maximum in (
+        ("hx711_change_threshold_g", 5.0, 0.5, 100.0),
+        ("hx711_restore_threshold_g", 2.0, 0.1, 50.0),
+    ):
+        number = value.get(key, default)
+        if type(number) not in (int, float) or not minimum <= number <= maximum:
+            raise ValueError(f"Invalid {key}")
+        value[key] = float(number)
+    if value["hx711_restore_threshold_g"] >= value["hx711_change_threshold_g"]:
+        raise ValueError("HX711 restore threshold must be below change threshold")
+    stable = value.get("hx711_stable_telemetry_samples", 2)
+    if type(stable) is not int or not 2 <= stable <= 8:
+        raise ValueError("Invalid hx711_stable_telemetry_samples")
+    value["hx711_stable_telemetry_samples"] = stable
+    overrides = value.get("hx711_slot_thresholds_g", {})
+    if (not isinstance(overrides, dict) or any(
+            code not in PRESENCE_SLOTS or type(amount) not in (float, int)
+            or not 0.5 <= amount <= 100.0 or
+            amount <= value["hx711_restore_threshold_g"]
+            for code, amount in overrides.items())):
+        raise ValueError("Invalid hx711_slot_thresholds_g")
+    value["hx711_slot_thresholds_g"] = overrides
     value["command_transport"] = value.get("command_transport", "direct")
     if value["command_transport"] not in {"direct", "legacy"}:
         raise ValueError("command_transport must be direct or legacy")
@@ -206,6 +230,7 @@ class HardwareService:
         # An explicit operator test overlay. Never active without a config opt-in.
         # Cleared at every new/synchronized workflow; does not touch ESP inputs.
         self._simulated_presence: dict[str, bool] = {}
+        self._hx_session: HX711PresenceSession | None = None
         # Test-only wrong-lift incidents for empty alternative compartments.
         # These are warnings, NOT fabricated item-presence readings.
         self._simulated_wrong_lifts: set[str] = set()
@@ -502,12 +527,22 @@ class HardwareService:
         if set(observed) != PRESENCE_SLOTS:
             raise ValueError("hardware_not_ready")
         for code, entry in observed.items():
-            if (entry.get("ready") is not True or entry.get("fault") not in {None, ""}
-                    or type(entry.get("present")) is not bool):
+            if (entry.get("ready") is not True or entry.get("fault") not in {None, ""}):
                 raise ValueError("hardware_not_ready")
-            if (not self.settings.get("sensor_simulation_enabled", False)
-                    and entry["present"] is not expected[code]):
-                raise ValueError("sensor_state_mismatch")
+            if telemetry.get("sensor_mode") == "hx711":
+                # A zero reading after boot tare is NOT an empty compartment.
+                # Use the signed unlock grant as logical occupancy authority,
+                # and measure changes against a new stable pre-door baseline.
+                if (entry.get("calibrated") is not True
+                        or entry.get("tare_ready") is not True
+                        or not HX711PresenceSession._valid_number(entry.get("grams"))):
+                    raise ValueError("hx711_sensor_not_ready")
+            else:
+                if type(entry.get("present")) is not bool:
+                    raise ValueError("hardware_not_ready")
+                if (not self.settings.get("sensor_simulation_enabled", False)
+                        and entry["present"] is not expected[code]):
+                    raise ValueError("sensor_state_mismatch")
         door_state = self.gpio.doors[door].snapshot()
         if door_state["door"] != "closed" or door_state["raw_level"] is None:
             raise ValueError("door_not_closed")
@@ -534,6 +569,16 @@ class HardwareService:
             "close_seq": None,
             "close_boot_id": None,
         }
+        self._hx_session = None
+        current = self.esp.last_telemetry or {}
+        if current.get("sensor_mode") == "hx711":
+            self._hx_session = HX711PresenceSession(
+                expected, current,
+                threshold_g=float(self.settings.get("hx711_change_threshold_g", 5.0)),
+                restore_g=float(self.settings.get("hx711_restore_threshold_g", 2.0)),
+                stable_samples=int(self.settings.get("hx711_stable_telemetry_samples", 2)),
+                slot_thresholds_g=self.settings.get("hx711_slot_thresholds_g", {}),
+                boot_id=self.esp.boot_id or "")
         self._local_present = expected.copy()
         self._simulated_presence = (expected.copy()
             if self.settings.get("sensor_simulation_enabled", False) else {})
@@ -699,11 +744,15 @@ class HardwareService:
                 "warning": self._local_warning_snapshot()}
 
     def _simulated_telemetry(self, telemetry: dict) -> dict:
-        if not self.settings.get("sensor_simulation_enabled", False) or not self._simulated_presence:
+        if (self._hx_session is None and
+                (not self.settings.get("sensor_simulation_enabled", False)
+                 or not self._simulated_presence)):
             return telemetry
-        # Only the boolean decisions are simulated. ESP connection, sampling
-        # freshness, boot ID, faults and the Pi reed remain genuine.
+        # Only logical occupancy is overlaid. Real raw readings, faults,
+        # timestamps and physical door checks remain authoritative.
         copy = json.loads(json.dumps(telemetry))
+        if self._hx_session is not None and copy.get("sensor_mode") == "hx711":
+            self._hx_session.overlay(copy)
         for entry in copy.get("slots", []):
             code = entry.get("code")
             if code in self._simulated_presence:
@@ -721,6 +770,8 @@ class HardwareService:
     async def _observe_local_telemetry(self, telemetry: dict) -> None:
         if self._local_operation is None:
             return
+        if self._hx_session is not None:
+            self._hx_session.observe(telemetry, self.esp.boot_id)
         readings = self._simulated_telemetry(telemetry).get("slots")
         if not isinstance(readings, list):
             return
@@ -782,7 +833,8 @@ class HardwareService:
             "esp_boot_id": boot_id,
             "telemetry_sequence": sequence,
             "sensor_source": ("operator_simulation"
-                if self.settings.get("sensor_simulation_enabled", False) else "esp32_switch"),
+                if self.settings.get("sensor_simulation_enabled", False)
+                else "esp32_hx711" if self._hx_session is not None else "esp32_switch"),
         }, None
 
     async def _try_local_completion(self, telemetry: dict) -> bool:
@@ -823,6 +875,7 @@ class HardwareService:
             self._local_operation["phase"] = "synced"
         self._local_operation = None
         self._local_present = {}
+        self._hx_session = None
         self._simulated_presence = {}
         self._simulated_wrong_lifts.clear()
         self._local_violations = {}
@@ -924,7 +977,8 @@ class HardwareService:
                 "last_unlock": self._last_unlock,
                 "local_warning": self._local_warning_snapshot(),
                 "door_workflow": self.door_workflow.snapshot(),
-                "sensor_simulation_active": bool(self._simulated_presence)}
+                "sensor_simulation_active": bool(self._simulated_presence),
+                "hx711_session_active": self._hx_session is not None}
 
     def _direct_event_snapshot(self) -> dict:
         """Detach queued evidence from mutable ESP/event dictionaries."""
@@ -1057,6 +1111,7 @@ class HardwareService:
                         and self._local_operation["command_id"] == command_id):
                     self._local_operation = None
                     self._local_present = {}
+                    self._hx_session = None
                     self._simulated_presence = {}
                     self._simulated_wrong_lifts.clear()
                     self._local_violations = {}
@@ -1066,7 +1121,8 @@ class HardwareService:
                             "actuators_disabled", "outputs_unverified", "unsupported_action",
                             "test_channel_not_allowed",
                             "door_workflow_busy", "door_not_closed", "hardware_not_ready",
-                            "sensor_state_mismatch", "invalid_unlock_grant",
+                            "sensor_state_mismatch", "hx711_sensor_not_ready",
+                            "invalid_unlock_grant",
                             "unlock_grant_expired", "unlock_grant_claim_mismatch"}:
                 code = "invalid_command"
             log_event("command_failed", command_id=command_id, code=code)
@@ -1086,6 +1142,7 @@ class HardwareService:
                     and self._local_operation["command_id"] == command_id):
                 self._local_operation = None
                 self._local_present = {}
+                self._hx_session = None
                 self._simulated_presence = {}
                 self._simulated_wrong_lifts.clear()
                 self._local_violations = {}
